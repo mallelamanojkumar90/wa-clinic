@@ -9,6 +9,7 @@ Env: OPENAI_API_KEY (or GEMINI_API_KEY with MODEL=gemini/gemini-2.0-flash),
 """
 import json, os, sqlite3, sys
 from datetime import datetime, timedelta
+from dotenv import load_dotenv; load_dotenv()
 
 DB = os.path.join(os.path.dirname(__file__), "clinic.db")
 MODEL = os.environ.get("MODEL", "openai/gpt-4o-mini")  # any OpenRouter model id
