@@ -4,12 +4,19 @@ Run modes:
   python app.py chat        -- terminal chat, no Meta account needed
   uvicorn app:app --port 8000   -- webhook server for WhatsApp Cloud API
 
-Env: OPENAI_API_KEY (or GEMINI_API_KEY with MODEL=gemini/gemini-2.0-flash),
-     WHATSAPP_TOKEN, WHATSAPP_PHONE_ID (only for real sending).
+Env: OPENROUTER_API_KEY, MODEL (default openai/gpt-4o-mini),
+     WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, VERIFY_TOKEN (only for real WhatsApp sending).
 """
 import json, os, sqlite3, sys
 from datetime import datetime, timedelta
 from dotenv import load_dotenv; load_dotenv()
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 DB = os.path.join(os.path.dirname(__file__), "clinic.db")
 MODEL = os.environ.get("MODEL", "openai/gpt-4o-mini")  # any OpenRouter model id
@@ -26,6 +33,9 @@ def db():
 
 def seed_slots():
     con = db()
+    now_iso = datetime.now().isoformat()
+    # Clean up past unbooked slots so they never clutter availability
+    con.execute("DELETE FROM appointments WHERE status='free' AND slot < ?", (now_iso,))
     base = datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     for day in range(2):
         for hour in (10, 11, 12, 17, 18):
@@ -36,7 +46,11 @@ def seed_slots():
 
 # ---------- tools the LLM can call ----------
 def get_free_slots():
-    rows = db().execute("SELECT slot FROM appointments WHERE status='free' ORDER BY slot").fetchall()
+    now_iso = datetime.now().isoformat()
+    rows = db().execute(
+        "SELECT slot FROM appointments WHERE status='free' AND slot > ? ORDER BY slot",
+        (now_iso,),
+    ).fetchall()
     out = []
     for (s,) in rows:
         d = datetime.fromisoformat(s)
@@ -44,8 +58,12 @@ def get_free_slots():
     return out
 
 def book_slot(slot: str, name: str, phone: str):
-    # ponytail: naive substring match on date+time; switch to parsed datetimes if ambiguity bites
-    rows = db().execute("SELECT slot FROM appointments WHERE status='free'").fetchall()
+    # naive substring match on date+time; switch to parsed datetimes if ambiguity bites
+    now_iso = datetime.now().isoformat()
+    rows = db().execute(
+        "SELECT slot FROM appointments WHERE status='free' AND slot > ?",
+        (now_iso,),
+    ).fetchall()
     want = slot.replace(",", "").replace("  ", " ").lower().strip()
     match = None
     for (s,) in rows:
@@ -92,8 +110,9 @@ def _client():
 def reply(user_text: str, phone: str, history: list) -> str:
     history.append({"role": "user", "content": user_text})
     msgs = [{"role": "system", "content": SYSTEM + f" Patient phone: {phone}"}] + history[-10:]
+    target_model = MODEL.split("/", 1)[1] if "/" in MODEL else MODEL
     for _ in range(4):  # ponytail: max 4 tool rounds per message
-        r = _client().chat.completions.create(model=MODEL.split("/", 1)[1], messages=msgs, tools=TOOLS)
+        r = _client().chat.completions.create(model=target_model, messages=msgs, tools=TOOLS)
         m = r.choices[0].message
         msgs.append(m)
         if not m.tool_calls:
@@ -111,7 +130,7 @@ def reply(user_text: str, phone: str, history: list) -> str:
 # ---------- terminal chat ----------
 def chat():
     seed_slots()
-    hist, phone = [], "+919030940864"
+    hist, phone = [], "+919876543210"
     print("Clinic receptionist POC. 'quit' to exit.")
     while (t := input("you> ").strip()) not in ("quit", ""):
         print("bot>", reply(t, phone, hist))
@@ -119,35 +138,67 @@ def chat():
 # ---------- webhook ----------
 def send_whatsapp(to, text):
     import requests
-    requests.post(f"https://graph.facebook.com/v21.0/{os.environ['WHATSAPP_PHONE_ID']}/messages",
+    res = requests.post(
+        f"https://graph.facebook.com/v21.0/{os.environ['WHATSAPP_PHONE_ID']}/messages",
         headers={"Authorization": f"Bearer {os.environ['WHATSAPP_TOKEN']}"},
-        json={"messaging_product": "whatsapp", "to": to, "text": {"body": text}}, timeout=10)
+        json={"messaging_product": "whatsapp", "to": to, "text": {"body": text}},
+        timeout=10,
+    )
+    print(f"[send_whatsapp] to={to} status={res.status_code} res={res.text}")
 
-_histories = {}  # phone -> messages  (ponytail: in-memory, move to Postgres when >1 process)
+_histories = {}  # phone -> messages  (in-memory, move to Postgres when >1 process)
 
 def create_app():
-    from fastapi import FastAPI, Request
-    app = FastAPI()
+    from fastapi import FastAPI, Request, Response, Query
+    seed_slots()
+    app = FastAPI(title="WhatsApp Clinic Receptionist")
+
+    @app.get("/")
+    def health():
+        return {"status": "ok", "service": "WhatsApp Clinic Receptionist"}
 
     @app.get("/webhook")  # Meta verification handshake
-    def verify(hub_mode: str = "", hub_verify_token: str = "", hub_challenge: str = ""):
-        return int(hub_challenge) if hub_verify_token == os.environ.get("VERIFY_TOKEN") else {"ok": False}
+    def verify(
+        hub_mode: str = Query("", alias="hub.mode"),
+        hub_verify_token: str = Query("", alias="hub.verify_token"),
+        hub_challenge: str = Query("", alias="hub.challenge"),
+    ):
+        print(f"[webhook-verify] mode={hub_mode} token={hub_verify_token} challenge={hub_challenge}")
+        if hub_mode == "subscribe" and hub_verify_token == os.environ.get("VERIFY_TOKEN"):
+            return Response(content=hub_challenge, media_type="text/plain")
+        return Response(content="Verification token mismatch", status_code=403)
 
     @app.post("/webhook")
     async def webhook(req: Request):
         body = await req.json()
+        print(f"[webhook] received: {json.dumps(body)}")
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
-                for msg in change.get("value", {}).get("messages", []):
-                    phone, text = msg["from"], msg["text"]["body"]
-                    out = reply(text, "+" + phone, _histories.setdefault(phone, []))
-                    try:
-                        send_whatsapp(phone, out)
-                    except Exception as e:
-                        print("send failed:", e)  # still 200 so Meta doesn't retry-storm
+                value = change.get("value", {})
+                for msg in value.get("messages", []):
+                    phone = msg.get("from")
+                    if not phone:
+                        continue
+                    text = ""
+                    if msg.get("type") == "text" and "text" in msg:
+                        text = msg["text"].get("body", "")
+                    elif "button" in msg:
+                        text = msg["button"].get("text", "")
+                    elif "interactive" in msg:
+                        text = msg["interactive"].get("button_reply", {}).get("title", "")
+
+                    if text:
+                        print(f"[webhook] processing message from +{phone}: '{text}'")
+                        out = reply(text, "+" + phone, _histories.setdefault(phone, []))
+                        try:
+                            send_whatsapp(phone, out)
+                        except Exception as e:
+                            print("[webhook] send failed:", e)
         return {"ok": True}
 
     return app
+
+app = create_app()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "chat":
