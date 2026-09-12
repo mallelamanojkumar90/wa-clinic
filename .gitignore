@@ -5,3 +5,4 @@ venv/
 *.pyc
 *service_account*.json
 service_account.json
+service_account_single_line.txt
