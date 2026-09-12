@@ -108,9 +108,67 @@ wa-clinic/
 2. Go to **WhatsApp** ➔ **Configuration** (in the left menu).
 3. Under **Webhook**, click **Edit**:
    - **Callback URL**: `https://<your-render-app>.onrender.com/webhook`
-   - **Verify token**: The value of your `VERIFY_TOKEN`.
+   - **Verify token**: The value of your `VERIFY_TOKEN` (e.g. `manojkumar`).
 4. Click **Verify and save**.
 5. Under **Webhook fields**, click **Manage** and subscribe to **`messages`**.
+
+---
+
+## 🔑 How to Generate a Permanent Meta System User Token (Never Expires)
+
+By default, Meta's Developer Dashboard gives you a **temporary token that expires in 24 hours**. When this token expires, your bot will stop replying to patients.
+
+To make your token **permanent (never-expiring)** for production:
+
+1. Open [Meta Business Settings](https://business.facebook.com/settings/).
+2. In the left navigation, go to **Users** ➔ **System users**.
+3. Click **Add**:
+   - **System username**: `clinic-bot-user`
+   - **System user role**: `Admin`
+   - Click **Create system user**.
+4. Click **Assign assets**:
+   - Select **WhatsApp Accounts** (or Apps).
+   - Select your clinic app / WhatsApp account.
+   - Toggle on **Full control** (Manage WhatsApp account).
+   - Click **Save changes**.
+5. Click **Generate new token**:
+   - Select your App from the dropdown.
+   - Under **Token expiration**, select **Never** (or the maximum allowable).
+   - Under **Available permissions**, check:
+     - `whatsapp_business_messaging`
+     - `whatsapp_business_management`
+   - Click **Generate token**.
+6. **Copy and save this token immediately** (Meta will only show it once).
+7. Paste this permanent token into Render:
+   - Go to [dashboard.render.com](https://dashboard.render.com/) ➔ `wa-clinic-receptionist` ➔ **Environment**.
+   - Edit `WHATSAPP_TOKEN` with this new permanent token and click **Save Changes**.
+
+---
+
+## 🛠️ Troubleshooting & FAQ
+
+### 1. "The bot received my message, but I didn't get a WhatsApp reply"
+- **Cause**: The `WHATSAPP_TOKEN` has expired (Meta returns `401 Unauthorized`).
+- **Fix**: Refresh your temporary token in Meta Dashboard (or generate a permanent System User token as described above), then update `WHATSAPP_TOKEN` in Render under **Environment** ➔ **Save Changes**.
+
+### 2. "Why am I receiving Jasper's Market grocery store messages?"
+- **Cause**: You clicked the blue **"Send message"** button in Meta Developer Console under API Setup. That button is Meta's hardcoded demo template sender.
+- **Fix**: Do not click that button. Simply open the **WhatsApp app on your mobile phone** and send a real message to the bot's phone number (`+1 555-168-0916`).
+
+### 3. "How do I verify the server is live and healthy?"
+Visit your Render root URL in your browser:
+`https://<your-app>.onrender.com/`
+It should return `200 OK` with:
+```json
+{
+  "status": "online",
+  "service": "Dr. Rao Clinic WhatsApp AI Receptionist",
+  "version": "2.0.0",
+  "database": "postgresql (supabase)",
+  "google_calendar_sync": true,
+  "model": "openai/gpt-4o-mini"
+}
+```
 
 ---
 
@@ -153,3 +211,4 @@ Aap kaunsa time book karna chahenge?
 You > Hi, I'd like to book Saturday at 11:00 AM for Manoj.
 Receptionist > Hello Manoj! Your appointment for Saturday, 12 Sep at 11:00 AM has been successfully booked.
 ```
+
