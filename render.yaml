@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: wa-clinic-receptionist
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: MODEL
+        value: openai/gpt-4o-mini
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_ID
+        sync: false
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        value: manojmanu05091994@gmail.com
+      - key: CLINIC_TIMEZONE
+        value: Asia/Kolkata
