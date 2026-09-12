@@ -4,15 +4,21 @@ from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    # LLM Settings
+    # LLM & Audio Settings
     OPENROUTER_API_KEY: str = ""
     MODEL: str = "openai/gpt-4o-mini"
+    GROQ_API_KEY: Optional[str] = None  # Fast Whisper audio transcription
+    OPENAI_API_KEY: Optional[str] = None  # Fallback Whisper audio transcription
 
     # WhatsApp Cloud API Settings
     WHATSAPP_TOKEN: str = ""
     WHATSAPP_PHONE_ID: str = ""
     VERIFY_TOKEN: str = "manojkumar"
     META_APP_SECRET: Optional[str] = None  # For X-Hub-Signature-256 HMAC verification
+
+    # Automated Reminders Settings
+    ENABLE_REMINDERS: bool = True
+    REMINDER_CHECK_INTERVAL_MINUTES: int = 15
 
     # Database Settings (Supabase / Postgres or local SQLite fallback)
     DATABASE_URL: Optional[str] = None

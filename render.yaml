@@ -15,6 +15,12 @@ services:
         value: openai/gpt-4o-mini
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ENABLE_REMINDERS
+        value: "true"
+      - key: REMINDER_CHECK_INTERVAL_MINUTES
+        value: "15"
       - key: WHATSAPP_TOKEN
         sync: false
       - key: WHATSAPP_PHONE_ID

@@ -10,6 +10,15 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 
 - 🌐 **Native Multi-Lingual Intelligence**:
   - Automatically speaks the patient's language: **Telugu**, **Hindi**, **English**, **Tenglish** (*"Repu 11 AM ki appointment kavali"*), **Hinglish** (*"Kal doctor available hai kya?"*), etc.
+- 🎙️ **Voice Notes & Audio Transcription (Whisper)**:
+  - Patients can send native WhatsApp voice notes in Telugu, Hindi, or English.
+  - Automatically downloaded from Meta and transcribed with **Groq Whisper** (`whisper-large-v3-turbo`) or **OpenAI Whisper** (`whisper-1`).
+- 🔘 **Interactive Buttons & Tap-to-Book Slot Lists**:
+  - Interactive reply buttons (`[ 📅 View Slots ]`, `[ ❌ Cancel Booking ]`, `[ ℹ️ Clinic Timings ]`).
+  - Native WhatsApp List Pickers display upcoming slots for one-tap booking without manual typing.
+- ⏰ **Automated Appointment Reminders (24h & 2h Alerts)**:
+  - Background scheduler (`APScheduler`) sends proactive WhatsApp reminders at **T-24h** and **T-2h**.
+  - Includes cancellation/reschedule instructions to minimize clinic no-shows.
 - 📅 **Live Google Calendar Real-Time Sync**:
   - Automatically queries Dr. Rao's actual clinic calendar free/busy blocks so double-bookings are impossible.
   - Automatically books calendar events with patient name, phone, and reminder alerts.
@@ -31,14 +40,16 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 ```text
 wa-clinic/
 ├── app/
-│   ├── config.py           # Pydantic Settings (Supabase, Google Calendar, Meta, OpenRouter)
+│   ├── config.py           # Pydantic Settings (Supabase, Google Calendar, Meta, OpenRouter, Whisper)
 │   ├── database.py         # SQLAlchemy engine with Supabase Postgres pool (SQLite dev fallback)
-│   ├── models.py           # Models: Appointment, ChatMessage, ProcessedWebhook
+│   ├── models.py           # Models: Appointment, ChatMessage, ProcessedWebhook (with reminder flags)
 │   ├── security.py         # HMAC-SHA256 Meta webhook signature verification
 │   ├── calendar_service.py # Google Calendar API: freebusy queries, event creation & cancellation
 │   ├── tools.py            # AI tools: get_free_slots, book_slot, cancel_booking
 │   ├── agent.py            # Multi-lingual conversational agent loop with tool dispatcher
-│   ├── whatsapp.py         # Meta Cloud API: message sending, mark-as-read
+│   ├── whatsapp.py         # Meta Cloud API: message sending, interactive buttons, list pickers
+│   ├── transcription.py    # Meta media download & Groq/OpenAI Whisper transcription
+│   ├── scheduler.py        # APScheduler automated 24h & 2h appointment reminder worker
 │   └── main.py             # FastAPI entrypoint, health checks, webhook handlers
 ├── scripts/
 │   └── setup_supabase.sql  # Production Supabase SQL migration script
@@ -91,6 +102,7 @@ wa-clinic/
 4. Fill in the environment variables when prompted:
    - `OPENROUTER_API_KEY`: Your OpenRouter API Key.
    - `MODEL`: `openai/gpt-4o-mini` (or `google/gemini-2.0-flash`).
+   - `GROQ_API_KEY`: Your Groq API Key for Whisper voice transcription (optional, for voice notes).
    - `WHATSAPP_TOKEN`: Permanent System User token (from Meta Business Manager).
    - `WHATSAPP_PHONE_ID`: Your WhatsApp Phone Number ID.
    - `VERIFY_TOKEN`: A secret token of your choice (e.g. `manojkumar`).

@@ -1,6 +1,6 @@
 """SQLAlchemy models for appointments, chat history, and webhook idempotency."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index
 from app.database import Base
 
 class Appointment(Base):
@@ -13,6 +13,8 @@ class Appointment(Base):
     status = Column(String(50), nullable=False, default="free", index=True)  # 'free', 'booked', 'cancelled'
     google_event_id = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
+    reminder_24h_sent = Column(Boolean, nullable=False, default=False)
+    reminder_2h_sent = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

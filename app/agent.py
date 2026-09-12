@@ -1,7 +1,7 @@
 """Multi-lingual AI Receptionist Agent powered by OpenRouter / OpenAI."""
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict
 from openai import OpenAI
 from app.config import settings
 from app.database import db_session

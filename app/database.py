@@ -49,23 +49,31 @@ def init_db():
     from app import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
-    # SQLite auto-migration for development databases
-    if not settings.is_postgres:
-        with engine.connect() as conn:
-            try:
+    # Auto-migration for missing columns (Postgres and SQLite)
+    with engine.connect() as conn:
+        try:
+            if settings.is_postgres:
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN NOT NULL DEFAULT FALSE")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN NOT NULL DEFAULT FALSE")
+                conn.commit()
+            else:
                 res = conn.exec_driver_sql("PRAGMA table_info(appointments)").fetchall()
                 existing_cols = {row[1] for row in res}
                 if "google_event_id" not in existing_cols:
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN google_event_id TEXT DEFAULT NULL")
                 if "notes" not in existing_cols:
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN notes TEXT DEFAULT NULL")
+                if "reminder_24h_sent" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN reminder_24h_sent BOOLEAN NOT NULL DEFAULT 0")
+                if "reminder_2h_sent" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN reminder_2h_sent BOOLEAN NOT NULL DEFAULT 0")
                 if "created_at" not in existing_cols:
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN created_at DATETIME DEFAULT NULL")
                 if "updated_at" not in existing_cols:
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN updated_at DATETIME DEFAULT NULL")
                 conn.commit()
-            except Exception as e:
-                pass
+        except Exception:
+            pass
 
 # Auto-initialize tables
 try:

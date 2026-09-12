@@ -12,9 +12,15 @@ CREATE TABLE IF NOT EXISTS appointments (
     status TEXT NOT NULL DEFAULT 'free', -- 'free', 'booked', 'cancelled'
     google_event_id TEXT DEFAULT NULL,   -- Associated Google Calendar Event ID
     notes TEXT DEFAULT NULL,
+    reminder_24h_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    reminder_2h_sent BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Migration support for existing appointments table
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_appointments_slot_status ON appointments (slot, status);
 CREATE INDEX IF NOT EXISTS idx_appointments_phone ON appointments (phone);

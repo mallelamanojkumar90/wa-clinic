@@ -1,9 +1,8 @@
 """Receptionist tools callable by the LLM agent: get_free_slots, book_slot, cancel_booking."""
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List
 import pytz
-from sqlalchemy import select, update
 from app.config import settings
 from app.database import db_session
 from app.models import Appointment
@@ -46,15 +45,26 @@ def seed_slots_if_needed():
 
 def get_free_slots() -> List[str]:
     """Retrieve available appointment slots (from Google Calendar if active, or DB)."""
-    # 1. If Google Calendar is active, query live availability
+    seed_slots_if_needed()
+    now = datetime.now(_get_tz())
+
+    # Get all slots currently booked in the database to prevent conflict
+    with db_session() as session:
+        booked_rows = session.query(Appointment).filter(
+            Appointment.status == "booked",
+            Appointment.slot > now
+        ).all()
+        booked_isos = {_to_clinic_tz(b.slot).strftime("%Y-%m-%dT%H:%M:%S") for b in booked_rows}
+
+    # 1. If Google Calendar is active, query live availability and exclude DB booked slots
     if calendar_service.is_available:
         cal_slots = calendar_service.get_free_slots(days_ahead=3)
         if cal_slots:
-            return [display for _, display in cal_slots]
+            filtered = [display for iso, display in cal_slots if iso not in booked_isos]
+            if filtered:
+                return filtered
 
     # 2. Database slot fallback
-    seed_slots_if_needed()
-    now = datetime.now(_get_tz())
     with db_session() as session:
         rows = session.query(Appointment).filter(
             Appointment.status == "free",
