@@ -19,6 +19,10 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 - ⏰ **Automated Appointment Reminders (24h & 2h Alerts)**:
   - Background scheduler (`APScheduler`) sends proactive WhatsApp reminders at **T-24h** and **T-2h**.
   - Includes cancellation/reschedule instructions to minimize clinic no-shows.
+- 💻 **Front-Desk Live Web Dashboard (`/dashboard`)**:
+  - Secure web interface for Dr. Rao & front-desk staff (PIN-protected).
+  - Live patient queue, 1-click consultation completion, slot blocking/unblocking, and walk-in bookings.
+  - **Emergency Delay Broadcast**: 1-click WhatsApp announcement to today's booked patients (*"Doctor running 30m late"*).
 - 📅 **Live Google Calendar Real-Time Sync**:
   - Automatically queries Dr. Rao's actual clinic calendar free/busy blocks so double-bookings are impossible.
   - Automatically books calendar events with patient name, phone, and reminder alerts.
@@ -50,6 +54,7 @@ wa-clinic/
 │   ├── whatsapp.py         # Meta Cloud API: message sending, interactive buttons, list pickers
 │   ├── transcription.py    # Meta media download & Groq/OpenAI Whisper transcription
 │   ├── scheduler.py        # APScheduler automated 24h & 2h appointment reminder worker
+│   ├── dashboard.py        # Front-desk live web dashboard router & UI (/dashboard)
 │   └── main.py             # FastAPI entrypoint, health checks, webhook handlers
 ├── scripts/
 │   └── setup_supabase.sql  # Production Supabase SQL migration script

@@ -244,3 +244,94 @@ def test_webhook_interactive_and_audio_payloads():
     }
     res_audio = client.post("/webhook", json=payload_audio)
     assert res_audio.status_code == 200
+
+def test_dashboard_views_and_apis(monkeypatch):
+    """Test dashboard frontend render, PIN authentication, status updating, and broadcast."""
+    import requests
+    class MockResponse:
+        status_code = 200
+        text = '{"success": true}'
+        def json(self):
+            return {"success": True}
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: MockResponse())
+
+    # 1. Dashboard HTML page renders successfully
+    res_page = client.get("/dashboard")
+    assert res_page.status_code == 200
+    assert "Dr. Rao's Clinic" in res_page.text
+
+    # 2. Unauthenticated API access is rejected
+    client.cookies.clear()
+    res_unauth = client.get("/api/dashboard/appointments")
+    assert res_unauth.status_code == 401
+
+    # 3. Authentication endpoint
+    res_fail = client.post("/api/dashboard/login", json={"pin": "wrong_pin"})
+    assert res_fail.status_code == 401
+
+    res_login = client.post("/api/dashboard/login", json={"pin": settings.DASHBOARD_PIN})
+    assert res_login.status_code == 200
+    assert "dashboard_pin" in res_login.headers.get("set-cookie", "")
+
+    # 4. Appointments API with cookie auth
+    res_appts = client.get("/api/dashboard/appointments")
+    assert res_appts.status_code == 200
+    data = res_appts.json()
+    assert "appointments" in data
+    assert "summary" in data
+
+    if data["appointments"]:
+        target_appt = data["appointments"][0]
+        appt_id = target_appt["id"]
+
+        # 4. Status update test
+        res_status = client.post(
+            "/api/dashboard/status",
+            json={"appointment_id": appt_id, "status": "blocked"},
+            headers=headers
+        )
+        assert res_status.status_code == 200
+        assert res_status.json()["status"] == "blocked"
+
+        # Reopen to free
+        res_free = client.post(
+            "/api/dashboard/status",
+            json={"appointment_id": appt_id, "status": "free"},
+            headers=headers
+        )
+        assert res_free.status_code == 200
+        assert res_free.json()["status"] == "free"
+
+        # 5. Walk-in booking test
+        res_walkin = client.post(
+            "/api/dashboard/book",
+            json={
+                "appointment_id": appt_id,
+                "patient_name": "Walkin Test Patient",
+                "phone": "919999900000",
+                "notes": "Walk-in consultation"
+            },
+            headers=headers
+        )
+        assert res_walkin.status_code == 200
+
+        # 6. Broadcast test
+        today_str = data["date"]
+        res_broadcast = client.post(
+            "/api/dashboard/broadcast",
+            json={
+                "date": today_str,
+                "message": "Notice: Dr. Rao is running 30 minutes late today."
+            },
+            headers=headers
+        )
+        assert res_broadcast.status_code == 200
+        assert "sent_count" in res_broadcast.json()
+
+        # Clean up test appointment
+        client.post(
+            "/api/dashboard/status",
+            json={"appointment_id": appt_id, "status": "free"},
+            headers=headers
+        )

@@ -15,6 +15,7 @@ from app.whatsapp import send_message, mark_as_read, send_slots_interactive_menu
 from app.transcription import download_whatsapp_media, transcribe_audio
 from app.scheduler import start_scheduler, stop_scheduler
 from app.tools import get_free_slots
+from app.dashboard import router as dashboard_router
 
 # Configure logging
 logging.basicConfig(
@@ -41,21 +42,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Dr. Rao Clinic - WhatsApp AI Receptionist",
-    description="Production-grade AI receptionist integrating WhatsApp Cloud API, Supabase, Google Calendar, Voice Notes, and Interactive Messages.",
-    version="2.1.0",
+    description="Production-grade AI receptionist integrating WhatsApp Cloud API, Supabase, Google Calendar, Voice Notes, Interactive Messages, and Front-Desk Dashboard.",
+    version="2.2.0",
     lifespan=lifespan
 )
+
+# Mount Dashboard Router
+app.include_router(dashboard_router)
 
 @app.get("/")
 def health_check():
     return {
         "status": "online",
         "service": "Dr. Rao Clinic WhatsApp AI Receptionist",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "database": "postgresql (supabase)" if settings.is_postgres else "sqlite (local)",
         "google_calendar_sync": calendar_service.is_available,
         "reminders_enabled": settings.ENABLE_REMINDERS,
         "audio_transcription": bool(settings.GROQ_API_KEY or settings.OPENAI_API_KEY),
+        "dashboard_url": "/dashboard",
         "model": settings.MODEL
     }
 

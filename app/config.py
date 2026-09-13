@@ -28,9 +28,10 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_ID: str = "primary"
     CLINIC_TIMEZONE: str = "Asia/Kolkata"
 
-    # Server Settings
+    # Server & Dashboard Settings
     PORT: int = 8000
     DEBUG: bool = False
+    DASHBOARD_PIN: str = "1234"
 
     model_config = SettingsConfigDict(
         env_file=".env",
