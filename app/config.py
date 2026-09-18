@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     ENABLE_REMINDERS: bool = True
     REMINDER_CHECK_INTERVAL_MINUTES: int = 15
 
+    # Razorpay Payment Gateway Settings
+    ENABLE_RAZORPAY: bool = False
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+    ADVANCE_TOKEN_AMOUNT_INR: int = 200
+    SLOT_HOLD_MINUTES: int = 15
+
+    # Voice AI Receptionist Settings (Bolna.dev / Vobiz)
+    ENABLE_VOICE_AI: bool = True
+    VOICE_API_SECRET: Optional[str] = None  # Optional shared secret header for Bolna webhook calls
+
     # Database Settings (Supabase / Postgres or local SQLite fallback)
     DATABASE_URL: Optional[str] = None
 

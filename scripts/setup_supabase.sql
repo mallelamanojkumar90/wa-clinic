@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS appointments (
 -- Migration support for existing appointments table
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) NOT NULL DEFAULT 'none';
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_link_id VARCHAR(255) DEFAULT NULL;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_link_url VARCHAR(500) DEFAULT NULL;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_amount INTEGER DEFAULT NULL;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS hold_expires_at TIMESTAMPTZ DEFAULT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_appointments_slot_status ON appointments (slot, status);
 CREATE INDEX IF NOT EXISTS idx_appointments_phone ON appointments (phone);

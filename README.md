@@ -8,6 +8,16 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 
 ## 🌟 Key Features
 
+- 📞 **Inbound Voice AI Receptionist (Bolna.dev + Vobiz Telephony)**:
+  - Answers live phone calls in **English, Telugu, and Hindi** (via Sarvam AI / Deepgram / Cartesia).
+  - Queries Google Calendar in real-time, qualifies patient inquiries, and reserves appointment slots over the call.
+  - Endpoints: `GET /api/voice/slots`, `POST /api/voice/book`, `POST /api/voice/cancel`.
+- 💳 **Razorpay UPI & Advance Token Payments**:
+  - Automatically generates 1-tap UPI payment links (Google Pay, PhonePe, Paytm, UPI QR).
+  - Holds slots provisionally for 15 minutes (`pending_payment`); auto-releases unpaid slots.
+  - Webhook listener (`POST /webhook/razorpay`) with HMAC-SHA256 signature verification confirms appointments and syncs Google Calendar upon payment capture.
+- 💬 **Omnichannel Phone-to-WhatsApp Handoff**:
+  - When callers book via phone call, an instant WhatsApp message delivers their UPI payment link and booking card.
 - 🌐 **Native Multi-Lingual Intelligence**:
   - Automatically speaks the patient's language: **Telugu**, **Hindi**, **English**, **Tenglish** (*"Repu 11 AM ki appointment kavali"*), **Hinglish** (*"Kal doctor available hai kya?"*), etc.
 - 🎙️ **Voice Notes & Audio Transcription (Whisper)**:
@@ -31,9 +41,8 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
   - Stores all appointments and conversation history in Supabase.
   - Patients can leave WhatsApp and return days later; their conversation context is never lost.
 - 🔒 **Production Security & Idempotency**:
-  - Meta `X-Hub-Signature-256` HMAC-SHA256 signature validation ensures requests come exclusively from Meta.
-  - Deduplication engine prevents duplicate AI replies when Meta retries webhooks.
-  - Sends immediate "read receipts" (blue check marks) and typing indicators.
+  - Meta `X-Hub-Signature-256` and Razorpay `X-Razorpay-Signature` HMAC-SHA256 signature validation.
+  - Deduplication engine prevents duplicate AI replies when webhooks retry.
 - 🚀 **One-Click Cloud Deployment**:
   - Preconfigured for **Render** (`render.yaml` and `Dockerfile`).
 
@@ -44,22 +53,26 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 ```text
 wa-clinic/
 ├── app/
-│   ├── config.py           # Pydantic Settings (Supabase, Google Calendar, Meta, OpenRouter, Whisper)
+│   ├── config.py           # Pydantic Settings (Supabase, Google Calendar, Meta, Razorpay, Voice AI)
 │   ├── database.py         # SQLAlchemy engine with Supabase Postgres pool (SQLite dev fallback)
-│   ├── models.py           # Models: Appointment, ChatMessage, ProcessedWebhook (with reminder flags)
+│   ├── models.py           # Models: Appointment, ChatMessage, ProcessedWebhook (with payment & reminder flags)
 │   ├── security.py         # HMAC-SHA256 Meta webhook signature verification
 │   ├── calendar_service.py # Google Calendar API: freebusy queries, event creation & cancellation
 │   ├── tools.py            # AI tools: get_free_slots, book_slot, cancel_booking
 │   ├── agent.py            # Multi-lingual conversational agent loop with tool dispatcher
 │   ├── whatsapp.py         # Meta Cloud API: message sending, interactive buttons, list pickers
 │   ├── transcription.py    # Meta media download & Groq/OpenAI Whisper transcription
-│   ├── scheduler.py        # APScheduler automated 24h & 2h appointment reminder worker
+│   ├── scheduler.py        # APScheduler automated 24h/2h reminders & expired hold cleanup
+│   ├── razorpay_service.py # Razorpay UPI payment link creation & HMAC webhook verification
+│   ├── voice_api.py        # Inbound Voice AI Receptionist endpoints for Bolna.dev / Vobiz
 │   ├── dashboard.py        # Front-desk live web dashboard router & UI (/dashboard)
 │   └── main.py             # FastAPI entrypoint, health checks, webhook handlers
 ├── scripts/
-│   └── setup_supabase.sql  # Production Supabase SQL migration script
+│   ├── setup_supabase.sql  # Production Supabase SQL migration script
+│   └── test_voice_agent_simulation.py # End-to-end voice agent call simulator
 ├── tests/
-│   └── test_production.py  # Automated test suite
+│   ├── test_production.py         # WhatsApp, Calendar & Dashboard test suite
+│   └── test_voice_and_payment.py  # Voice AI & Razorpay test suite
 ├── Dockerfile              # Production multi-stage container
 ├── render.yaml             # Render one-click blueprint
 ├── requirements.txt        # Production Python dependencies
@@ -159,6 +172,55 @@ To make your token **permanent (never-expiring)** for production:
 7. Paste this permanent token into Render:
    - Go to [dashboard.render.com](https://dashboard.render.com/) ➔ `wa-clinic-receptionist` ➔ **Environment**.
    - Edit `WHATSAPP_TOKEN` with this new permanent token and click **Save Changes**.
+
+---
+
+### Step 5: Connect Inbound Voice AI Receptionist (Bolna.dev + Vobiz)
+
+1. **In Vobiz Console** ([vobiz.ai](https://vobiz.ai)):
+   - Go to **SIP Trunking** ➔ **Inbound Trunks**.
+   - Create Inbound Trunk pointing to Bolna SIP URI:
+     `sip:sip.bolna.ai:5061;transport=tls` (or `sip:sip.bolna.ai:5060`).
+   - Under **Phone Numbers / DIDs**, assign your clinic number to this trunk.
+   - Under **Settings ➔ API Keys**, copy your Vobiz Auth Token & Secret.
+2. **In Bolna.dev Dashboard** ([bolna.dev](https://bolna.dev)):
+   - Go to **Integrations ➔ Telephony Providers** ➔ Add **Vobiz** with your credentials.
+   - Go to **Inbound Numbers** ➔ Map your Vobiz phone number to your Receptionist Agent.
+3. **Add Webhook Tools in Bolna (Generate from cURL)**:
+   - **Check Slots**:
+     ```bash
+     curl -X GET "https://<your-render-app>.onrender.com/api/voice/slots?date=tomorrow"
+     ```
+   - **Book Slot**:
+     ```bash
+     curl -X POST "https://<your-render-app>.onrender.com/api/voice/book" \
+       -H "Content-Type: application/json" \
+       -d '{"patient_name": "{patient_name}", "phone": "{caller_phone}", "slot": "{slot}", "notes": "{notes}"}'
+     ```
+   - **Cancel Slot**:
+     ```bash
+     curl -X POST "https://<your-render-app>.onrender.com/api/voice/cancel" \
+       -H "Content-Type: application/json" \
+       -d '{"phone": "{caller_phone}"}'
+     ```
+
+---
+
+### Step 6: (Optional) Set up Razorpay UPI Advance Token Payments
+
+If you wish to require an advance token (e.g., ₹200) to confirm appointments:
+1. Log in to your [Razorpay Dashboard](https://dashboard.razorpay.com/) ➔ **Settings** ➔ **API Keys** ➔ Generate Key ID & Key Secret.
+2. Go to **Settings** ➔ **Webhooks** ➔ **Add New Webhook**:
+   - **Webhook URL**: `https://<your-render-app>.onrender.com/webhook/razorpay`
+   - **Secret**: A secret passphrase of your choice (e.g. `clinic_rzp_secret_2026`).
+   - **Active Events**: Check `payment_link.paid` and `payment.captured`.
+3. In Render (or `.env`), set:
+   - `ENABLE_RAZORPAY=true`
+   - `RAZORPAY_KEY_ID=rzp_live_...`
+   - `RAZORPAY_KEY_SECRET=...`
+   - `RAZORPAY_WEBHOOK_SECRET=clinic_rzp_secret_2026`
+   - `ADVANCE_TOKEN_AMOUNT_INR=200`
+   - `SLOT_HOLD_MINUTES=15`
 
 ---
 

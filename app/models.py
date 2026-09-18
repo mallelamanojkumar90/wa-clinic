@@ -10,11 +10,17 @@ class Appointment(Base):
     patient_name = Column(String(255), nullable=False, default="")
     phone = Column(String(50), nullable=False, default="", index=True)
     slot = Column(DateTime(timezone=True), nullable=False, unique=True, index=True)
-    status = Column(String(50), nullable=False, default="free", index=True)  # 'free', 'booked', 'cancelled'
+    status = Column(String(50), nullable=False, default="free", index=True)  # 'free', 'booked', 'cancelled', 'pending_payment'
     google_event_id = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
     reminder_24h_sent = Column(Boolean, nullable=False, default=False)
     reminder_2h_sent = Column(Boolean, nullable=False, default=False)
+    # Payment and slot lock tracking
+    payment_status = Column(String(50), nullable=False, default="none", index=True)  # 'none', 'pending', 'paid', 'failed'
+    payment_link_id = Column(String(255), nullable=True)
+    payment_link_url = Column(String(500), nullable=True)
+    payment_amount = Column(Integer, nullable=True)
+    hold_expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

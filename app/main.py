@@ -14,8 +14,11 @@ from app.agent import reply
 from app.whatsapp import send_message, mark_as_read, send_slots_interactive_menu, send_welcome_action_buttons
 from app.transcription import download_whatsapp_media, transcribe_audio
 from app.scheduler import start_scheduler, stop_scheduler
-from app.tools import get_free_slots
+from app.tools import get_free_slots, _to_clinic_tz
 from app.dashboard import router as dashboard_router
+from app.voice_api import router as voice_router
+from app.razorpay_service import razorpay_service
+from app.models import Appointment
 
 # Configure logging
 logging.basicConfig(
@@ -41,25 +44,30 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down clinic receptionist service.")
 
 app = FastAPI(
-    title="Dr. Rao Clinic - WhatsApp AI Receptionist",
-    description="Production-grade AI receptionist integrating WhatsApp Cloud API, Supabase, Google Calendar, Voice Notes, Interactive Messages, and Front-Desk Dashboard.",
-    version="2.2.0",
+    title="Dr. Rao Clinic - WhatsApp & Voice AI Receptionist",
+    description="Production-grade AI receptionist integrating WhatsApp Cloud API, Voice AI (Bolna/Vobiz), Razorpay UPI Payments, Supabase, Google Calendar, and Front-Desk Dashboard.",
+    version="2.3.0",
     lifespan=lifespan
 )
 
-# Mount Dashboard Router
+# Mount Dashboard & Voice AI Routers
 app.include_router(dashboard_router)
+app.include_router(voice_router)
 
 @app.get("/")
 def health_check():
     return {
         "status": "online",
-        "service": "Dr. Rao Clinic WhatsApp AI Receptionist",
-        "version": "2.2.0",
+        "service": "Dr. Rao Clinic WhatsApp & Voice AI Receptionist",
+        "version": "2.3.0",
         "database": "postgresql (supabase)" if settings.is_postgres else "sqlite (local)",
         "google_calendar_sync": calendar_service.is_available,
         "reminders_enabled": settings.ENABLE_REMINDERS,
         "audio_transcription": bool(settings.GROQ_API_KEY or settings.OPENAI_API_KEY),
+        "voice_ai_enabled": settings.ENABLE_VOICE_AI,
+        "voice_endpoints": ["/api/voice/slots", "/api/voice/book", "/api/voice/cancel"],
+        "razorpay_enabled": settings.ENABLE_RAZORPAY,
+        "advance_token_inr": settings.ADVANCE_TOKEN_AMOUNT_INR,
         "dashboard_url": "/dashboard",
         "model": settings.MODEL
     }
@@ -221,3 +229,87 @@ async def meta_webhook_handler(
                     background_tasks.add_task(process_patient_message, phone, text, msg_id, audio_id)
 
     return {"ok": True}
+
+@app.post("/webhook/razorpay")
+async def razorpay_webhook_handler(
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """Incoming Razorpay Payment Gateway Webhook for advance token payments."""
+    raw_body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature")
+
+    if not razorpay_service.verify_webhook_signature(raw_body, signature):
+        logger.warning("Invalid Razorpay webhook signature.")
+        return Response(content="Invalid signature", status_code=400)
+
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except Exception as e:
+        logger.error(f"Invalid JSON from Razorpay: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    event = data.get("event")
+    logger.info(f"Received Razorpay webhook event: {event}")
+
+    if event in ("payment_link.paid", "payment.captured"):
+        payload_data = data.get("payload", {})
+        plink_entity = payload_data.get("payment_link", {}).get("entity", {})
+        payment_entity = payload_data.get("payment", {}).get("entity", {})
+
+        # Extract appointment ID or payment link ID
+        notes = plink_entity.get("notes") or payment_entity.get("notes") or {}
+        appt_id = notes.get("appointment_id")
+        plink_id = plink_entity.get("id")
+        payment_id = payment_entity.get("id") or "UPI_DIRECT"
+        amount_paid = (plink_entity.get("amount_paid") or payment_entity.get("amount") or 0) // 100
+
+        with db_session() as session:
+            appt = None
+            if appt_id:
+                try:
+                    appt = session.query(Appointment).filter_by(id=int(appt_id)).first()
+                except (ValueError, TypeError):
+                    pass
+            if not appt and plink_id:
+                appt = session.query(Appointment).filter_by(payment_link_id=plink_id).first()
+
+            if not appt:
+                logger.warning(f"No appointment found matching Razorpay webhook (appt_id={appt_id}, plink_id={plink_id})")
+                return {"status": "ignored"}
+
+            # Idempotency: if already confirmed and paid, don't duplicate calendar/messages
+            if appt.status == "booked" and appt.payment_status == "paid":
+                logger.info(f"Appointment {appt.id} already paid and booked. Skipping duplicate webhook.")
+                return {"status": "already_processed"}
+
+            # Promote from pending_payment to booked
+            local_dt = _to_clinic_tz(appt.slot)
+            pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p")
+            slot_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+            appt.status = "booked"
+            appt.payment_status = "paid"
+            appt.hold_expires_at = None
+
+            # Sync with Google Calendar
+            if calendar_service.is_available and not appt.google_event_id:
+                try:
+                    g_event_id = calendar_service.create_booking_event(appt.patient_name, appt.phone, slot_iso)
+                    appt.google_event_id = g_event_id
+                except Exception as e:
+                    logger.error(f"Failed to create Google Calendar event after payment: {e}")
+
+            # Send immediate WhatsApp confirmation
+            if appt.phone:
+                conf_text = (
+                    f"✅ *Dr. Rao's Clinic - Advance Token Received*\n\n"
+                    f"Hello *{appt.patient_name}*, we received your UPI payment of *₹{amount_paid or settings.ADVANCE_TOKEN_AMOUNT_INR}* (Ref: {payment_id}).\n\n"
+                    f"📅 *Appointment*: {pretty_slot}\n"
+                    f"📍 *Clinic Address*: Dr. Rao's Clinic, Road No. 36, Jubilee Hills, Hyderabad\n"
+                    f"🗺️ *Google Maps*: https://maps.google.com/?q=Dr+Raos+Clinic+Hyderabad\n\n"
+                    f"Your slot is confirmed. If you need to reschedule or cancel, reply to this message!"
+                )
+                background_tasks.add_task(send_message, appt.phone, conf_text)
+
+    return {"status": "ok"}

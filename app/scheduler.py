@@ -76,6 +76,55 @@ def check_and_send_reminders() -> int:
 
     return reminders_sent
 
+def release_expired_holds() -> int:
+    """
+    Scan provisional holds (status="pending_payment") whose hold_expires_at is in the past.
+    Reverts them to status="free" and notifies the patient on WhatsApp.
+    Returns count of released slots.
+    """
+    tz = _get_tz()
+    now = datetime.now(tz)
+    released = 0
+
+    with db_session() as session:
+        expired_appts = session.query(Appointment).filter(
+            Appointment.status == "pending_payment",
+            Appointment.hold_expires_at.isnot(None),
+            Appointment.hold_expires_at < now
+        ).all()
+
+        for appt in expired_appts:
+            phone = appt.phone
+            patient_name = appt.patient_name or "Patient"
+            local_slot = _to_clinic_tz(appt.slot)
+            pretty_time = local_slot.strftime("%a %d %b, %I:%M %p")
+
+            # Revert slot to free
+            appt.status = "free"
+            appt.payment_status = "failed"
+            appt.patient_name = ""
+            appt.phone = ""
+            appt.payment_link_id = None
+            appt.payment_link_url = None
+            appt.hold_expires_at = None
+            released += 1
+
+            logger.info(f"Released expired provisional hold for slot {pretty_time} (phone: +{phone})")
+
+            # Send gentle notification to patient
+            if phone:
+                text = (
+                    f"⌛ *Dr. Rao's Clinic - Reservation Expired*\n\n"
+                    f"Hello {patient_name}, your provisional reservation for *{pretty_time}* expired as the advance payment was not completed.\n\n"
+                    f"The slot has been released. If you would still like to consult Dr. Rao, simply reply to this message or call our clinic to book a new slot!"
+                )
+                try:
+                    send_message(phone, text)
+                except Exception as e:
+                    logger.debug(f"Could not send hold expiration alert to +{phone}: {e}")
+
+    return released
+
 def start_scheduler():
     """Start the background appointment reminder scheduler."""
     if not settings.ENABLE_REMINDERS:
@@ -90,8 +139,15 @@ def start_scheduler():
             id="clinic_appointment_reminders",
             replace_existing=True
         )
+        scheduler.add_job(
+            release_expired_holds,
+            "interval",
+            minutes=2,
+            id="clinic_release_expired_holds",
+            replace_existing=True
+        )
         scheduler.start()
-        logger.info(f"Appointment reminder scheduler started (interval: {settings.REMINDER_CHECK_INTERVAL_MINUTES}m)")
+        logger.info(f"Appointment reminder scheduler started (interval: {settings.REMINDER_CHECK_INTERVAL_MINUTES}m, hold cleaner: 2m)")
 
 def stop_scheduler():
     """Gracefully shutdown background scheduler."""

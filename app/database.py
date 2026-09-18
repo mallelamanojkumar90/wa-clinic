@@ -55,6 +55,11 @@ def init_db():
             if settings.is_postgres:
                 conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_24h_sent BOOLEAN NOT NULL DEFAULT FALSE")
                 conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_2h_sent BOOLEAN NOT NULL DEFAULT FALSE")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) NOT NULL DEFAULT 'none'")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_link_id VARCHAR(255) DEFAULT NULL")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_link_url VARCHAR(500) DEFAULT NULL")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_amount INTEGER DEFAULT NULL")
+                conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS hold_expires_at TIMESTAMPTZ DEFAULT NULL")
                 conn.commit()
             else:
                 res = conn.exec_driver_sql("PRAGMA table_info(appointments)").fetchall()
@@ -71,6 +76,16 @@ def init_db():
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN created_at DATETIME DEFAULT NULL")
                 if "updated_at" not in existing_cols:
                     conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN updated_at DATETIME DEFAULT NULL")
+                if "payment_status" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'none'")
+                if "payment_link_id" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN payment_link_id TEXT DEFAULT NULL")
+                if "payment_link_url" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN payment_link_url TEXT DEFAULT NULL")
+                if "payment_amount" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN payment_amount INTEGER DEFAULT NULL")
+                if "hold_expires_at" not in existing_cols:
+                    conn.exec_driver_sql("ALTER TABLE appointments ADD COLUMN hold_expires_at DATETIME DEFAULT NULL")
                 conn.commit()
         except Exception:
             pass

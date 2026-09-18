@@ -107,7 +107,7 @@ def get_daily_appointments(
         ).order_by(Appointment.slot.asc()).all()
 
         items = []
-        counts = {"total": 0, "booked": 0, "completed": 0, "free": 0, "blocked": 0}
+        counts = {"total": 0, "booked": 0, "completed": 0, "free": 0, "blocked": 0, "pending_payment": 0}
 
         for appt in records:
             local_dt = _to_clinic_tz(appt.slot)
@@ -125,6 +125,9 @@ def get_daily_appointments(
                 "patient_name": appt.patient_name or "",
                 "phone": appt.phone or "",
                 "status": item_status,
+                "payment_status": appt.payment_status or "none",
+                "payment_amount": appt.payment_amount,
+                "payment_link_url": appt.payment_link_url or "",
                 "notes": appt.notes or "",
                 "google_event_id": appt.google_event_id or ""
             })
