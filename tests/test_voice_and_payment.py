@@ -98,7 +98,16 @@ def test_voice_cancel():
 
     with db_session() as session:
         appt = session.query(Appointment).filter_by(phone="919811122233").first()
-        assert appt is None
+        assert appt is not None
+        assert appt.status == "cancelled"
+
+def test_voice_cancel_incomplete_phone():
+    """Test voice cancel endpoint rejects incomplete phone numbers (e.g. 'plus nine one')."""
+    res = client.post("/api/voice/cancel", json={"phone": "plus nine one"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "invalid_phone"
+    assert "10-digit" in data["spoken_text"]
 
 def test_voice_booking_with_razorpay_hold():
     """Test voice booking when Razorpay advance token is required (provisional 15m hold)."""

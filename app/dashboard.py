@@ -107,7 +107,7 @@ def get_daily_appointments(
         ).order_by(Appointment.slot.asc()).all()
 
         items = []
-        counts = {"total": 0, "booked": 0, "completed": 0, "free": 0, "blocked": 0, "pending_payment": 0}
+        counts = {"total": 0, "booked": 0, "completed": 0, "free": 0, "blocked": 0, "pending_payment": 0, "cancelled": 0}
 
         for appt in records:
             local_dt = _to_clinic_tz(appt.slot)
@@ -163,8 +163,12 @@ def update_appointment_status(
             except Exception as e:
                 logger.error(f"Error removing calendar event: {e}")
             appt.google_event_id = None
+
+        if new_status == "free":
             appt.patient_name = ""
             appt.phone = ""
+        elif new_status == "cancelled":
+            appt.notes = f"{appt.notes or ''} [Cancelled via Front-Desk]".strip()
 
         appt.status = new_status
         session.commit()
@@ -352,7 +356,7 @@ def render_dashboard(request: Request):
         </div>
 
         <!-- KPI Metrics Grid -->
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-3">
             <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                 <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Today's Total</p>
                 <p class="text-2xl font-bold text-slate-900 mt-1" id="stat-total">0</p>
@@ -367,6 +371,11 @@ def render_dashboard(request: Request):
                 <p class="text-xs font-semibold text-clinic-600 uppercase tracking-wider">Completed</p>
                 <p class="text-2xl font-bold text-clinic-600 mt-1" id="stat-completed">0</p>
                 <span class="text-xs text-slate-400 font-medium">Finished consultations</span>
+            </div>
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <p class="text-xs font-semibold text-rose-600 uppercase tracking-wider">Cancelled</p>
+                <p class="text-2xl font-bold text-rose-600 mt-1" id="stat-cancelled">0</p>
+                <span class="text-xs text-slate-400 font-medium">Cancelled bookings</span>
             </div>
             <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                 <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Free Available</p>
@@ -590,6 +599,7 @@ def render_dashboard(request: Request):
                 document.getElementById('stat-total').innerText = data.summary.total;
                 document.getElementById('stat-booked').innerText = data.summary.booked;
                 document.getElementById('stat-completed').innerText = data.summary.completed;
+                document.getElementById('stat-cancelled').innerText = data.summary.cancelled || 0;
                 document.getElementById('stat-free').innerText = data.summary.free;
 
                 tbody.innerHTML = '';
@@ -611,8 +621,11 @@ def render_dashboard(request: Request):
                     } else if (appt.status === 'completed') {
                         badgeColor = 'bg-blue-50 text-blue-700 border-blue-200';
                         badgeLabel = 'COMPLETED';
-                    } else if (appt.status === 'blocked') {
+                    } else if (appt.status === 'cancelled') {
                         badgeColor = 'bg-rose-50 text-rose-700 border-rose-200';
+                        badgeLabel = 'CANCELLED';
+                    } else if (appt.status === 'blocked') {
+                        badgeColor = 'bg-slate-100 text-slate-700 border-slate-300';
                         badgeLabel = 'BLOCKED';
                     } else if (appt.status === 'free') {
                         badgeColor = 'bg-slate-50 text-slate-500 border-slate-200';
@@ -636,6 +649,8 @@ def render_dashboard(request: Request):
                                 </button>
                             </div>
                         `;
+                    } else if (appt.status === 'cancelled') {
+                        actionsHtml = `<span class="text-xs text-rose-500 font-semibold flex items-center justify-end gap-1"><i class="fa-solid fa-ban text-rose-500"></i> Cancelled</span>`;
                     } else if (appt.status === 'free') {
                         actionsHtml = `
                             <div class="flex items-center justify-end gap-1.5">

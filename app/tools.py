@@ -76,7 +76,7 @@ def get_free_slots() -> List[str]:
     seed_slots_if_needed()
     with db_session() as session:
         rows = session.query(Appointment).filter(
-            Appointment.status == "free",
+            Appointment.status.in_(["free", "cancelled"]),
             Appointment.slot > now
         ).order_by(Appointment.slot).all()
 
@@ -95,9 +95,9 @@ def book_slot(slot: str, name: str, phone: str) -> str:
     want = slot.replace(",", "").replace("  ", " ").lower().strip()
 
     with db_session() as session:
-        # Retrieve all free upcoming slots
+        # Retrieve all available upcoming slots
         rows = session.query(Appointment).filter(
-            Appointment.status == "free",
+            Appointment.status.in_(["free", "cancelled"]),
             Appointment.slot > now
         ).all()
 
@@ -131,17 +131,31 @@ def book_slot(slot: str, name: str, phone: str) -> str:
         matched_slot.patient_name = name
         matched_slot.phone = clean_phone
         matched_slot.status = "booked"
+        matched_slot.notes = None
         matched_slot.google_event_id = g_event_id
 
         return f"Booked {name} for {pretty_slot}"
 
 def cancel_booking(phone: str) -> str:
-    """Cancel patient's existing booking and delete from Google Calendar."""
-    clean_phone = phone.lstrip("+")
+    """Cancel patient's existing booking, delete from Google Calendar, and update status to cancelled."""
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) < 10:
+        return "Please provide a valid 10-digit phone number."
+
+    tz = _get_tz()
+    now = datetime.now(tz)
+
+    # Support matching with or without '91' country code
+    phone_variants = [digits]
+    if digits.startswith("91") and len(digits) > 10:
+        phone_variants.append(digits[2:])
+    elif len(digits) == 10:
+        phone_variants.append(f"91{digits}")
+
     with db_session() as session:
         appt = session.query(Appointment).filter(
-            Appointment.phone == clean_phone,
-            Appointment.status == "booked"
+            Appointment.phone.in_(phone_variants),
+            Appointment.status.in_(["booked", "pending_payment"])
         ).order_by(Appointment.slot.desc()).first()
 
         if not appt:
@@ -149,15 +163,20 @@ def cancel_booking(phone: str) -> str:
 
         # Remove from Google Calendar if event exists
         if appt.google_event_id and calendar_service.is_available:
-            calendar_service.delete_booking_event(appt.google_event_id)
+            try:
+                calendar_service.delete_booking_event(appt.google_event_id)
+            except Exception as e:
+                logger.error(f"Error removing Google Calendar event during cancel: {e}")
 
-        # Reset appointment status to free
-        appt.patient_name = ""
-        appt.phone = ""
-        appt.status = "free"
+        local_dt = _to_clinic_tz(appt.slot)
+        pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p").replace(" 0", " ")
+
+        # Retain patient details and mark status as 'cancelled' for dashboard tracking
+        appt.status = "cancelled"
+        appt.notes = f"{appt.notes or ''} [Cancelled via AI on {now.strftime('%d %b %I:%M %p')}]".strip()
         appt.google_event_id = None
 
-        return "Your appointment has been successfully cancelled."
+        return f"Your appointment for {pretty_slot} has been successfully cancelled."
 
 TOOL_DEFINITIONS = [
     {

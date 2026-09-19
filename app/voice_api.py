@@ -240,9 +240,9 @@ def book_voice_slot(
     seed_slots_if_needed()
 
     with db_session() as session:
-        # Query free upcoming slots
+        # Query available upcoming slots
         rows = session.query(Appointment).filter(
-            Appointment.status == "free",
+            Appointment.status.in_(["free", "cancelled"]),
             Appointment.slot > now
         ).all()
 
@@ -411,16 +411,26 @@ def cancel_voice_booking(
 ):
     """Called by Bolna Voice AI Agent when caller asks to cancel their booking."""
     _verify_voice_secret(x_voice_secret)
-    clean_phone = payload.phone.lstrip("+").strip()
+    raw_phone = payload.phone.lstrip("+").strip()
+    digits = "".join(c for c in raw_phone if c.isdigit())
+
+    # Prevent accidental cancellations if caller only spoke a country code or partial number
+    if len(digits) < 10:
+        return {
+            "status": "invalid_phone",
+            "spoken_text": "I didn't catch your complete phone number. Could you please say your full 10-digit mobile number so I can locate your booking?"
+        }
+
+    clean_phone = digits
     result = cancel_booking(clean_phone)
 
     if "successfully cancelled" in result.lower():
         send_message(
             clean_phone,
-            "❌ *Dr. Rao's Clinic*: Your appointment has been cancelled as requested over phone call. Reply to this message if you would like to book a new slot."
+            f"❌ *Dr. Rao's Clinic - Booking Cancelled*\n\n{result}\n\nIf you would like to reschedule at any time, simply reply to this message."
         )
-        spoken_text = "Your appointment has been cancelled. We've sent a confirmation to your WhatsApp. Let us know if you'd like to schedule for another time."
-        return {"status": "cancelled", "spoken_text": spoken_text}
+        spoken_text = f"{result} I have also sent a confirmation to your WhatsApp. Let us know if you'd like to schedule for another time."
+        return {"status": "cancelled", "message": result, "spoken_text": spoken_text}
     else:
-        spoken_text = "I couldn't find an active booking under this phone number. Would you like me to check available slots to book a new appointment?"
-        return {"status": "not_found", "spoken_text": spoken_text}
+        spoken_text = "I couldn't find an active appointment under that phone number. Could you please confirm the 10-digit number you booked with?"
+        return {"status": "not_found", "message": result, "spoken_text": spoken_text}
