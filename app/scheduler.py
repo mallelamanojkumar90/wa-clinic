@@ -7,6 +7,7 @@ from app.config import settings
 from app.database import db_session
 from app.models import Appointment
 from app.whatsapp import send_message
+from app.calendar_service import calendar_service
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,13 @@ def release_expired_holds() -> int:
             local_slot = _to_clinic_tz(appt.slot)
             pretty_time = local_slot.strftime("%a %d %b, %I:%M %p")
 
+            # Remove from Google Calendar if event exists
+            if appt.google_event_id and calendar_service.is_available:
+                try:
+                    calendar_service.delete_booking_event(appt.google_event_id)
+                except Exception as e:
+                    logger.error(f"Error removing calendar event during hold expiration: {e}")
+
             # Revert slot to free
             appt.status = "free"
             appt.payment_status = "failed"
@@ -107,6 +115,7 @@ def release_expired_holds() -> int:
             appt.payment_link_id = None
             appt.payment_link_url = None
             appt.hold_expires_at = None
+            appt.google_event_id = None
             released += 1
 
             logger.info(f"Released expired provisional hold for slot {pretty_time} (phone: +{phone})")
@@ -124,6 +133,30 @@ def release_expired_holds() -> int:
                     logger.debug(f"Could not send hold expiration alert to +{phone}: {e}")
 
     return released
+
+def sync_and_clean_orphan_calendar_events() -> int:
+    """
+    Purge orphaned Google Calendar events that do not match active booked appointments in DB.
+    Ensures doctor's calendar never contains ghost events or triggers phantom reminders.
+    """
+    if not calendar_service.is_available:
+        return 0
+
+    try:
+        with db_session() as session:
+            booked_appts = session.query(Appointment).filter(
+                Appointment.status == "booked",
+                Appointment.google_event_id.isnot(None)
+            ).all()
+            valid_ids = {a.google_event_id for a in booked_appts if a.google_event_id}
+
+        purged = calendar_service.purge_orphaned_calendar_events(valid_ids)
+        if purged > 0:
+            logger.info(f"Purged {purged} orphaned event(s) from Google Calendar.")
+        return purged
+    except Exception as e:
+        logger.error(f"Error running orphan calendar cleaner: {e}")
+        return 0
 
 def start_scheduler():
     """Start the background appointment reminder scheduler."""
@@ -146,8 +179,21 @@ def start_scheduler():
             id="clinic_release_expired_holds",
             replace_existing=True
         )
+        scheduler.add_job(
+            sync_and_clean_orphan_calendar_events,
+            "interval",
+            minutes=30,
+            id="clinic_purge_orphan_calendar_events",
+            replace_existing=True
+        )
         scheduler.start()
-        logger.info(f"Appointment reminder scheduler started (interval: {settings.REMINDER_CHECK_INTERVAL_MINUTES}m, hold cleaner: 2m)")
+        logger.info(f"Appointment reminder scheduler started (interval: {settings.REMINDER_CHECK_INTERVAL_MINUTES}m, hold cleaner: 2m, calendar sync: 30m)")
+
+        # Run orphan cleaner once at startup in background
+        try:
+            sync_and_clean_orphan_calendar_events()
+        except Exception as e:
+            logger.error(f"Initial calendar sync failed: {e}")
 
 def stop_scheduler():
     """Gracefully shutdown background scheduler."""

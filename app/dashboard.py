@@ -257,6 +257,13 @@ def broadcast_delay_alert(
         "total_recipients": len(recipients)
     }
 
+@router.post("/api/dashboard/calendar/sync")
+def sync_calendar(_: None = Depends(require_auth)):
+    """Sync Google Calendar and purge any orphaned events not active in DB."""
+    from app.scheduler import sync_and_clean_orphan_calendar_events
+    purged = sync_and_clean_orphan_calendar_events()
+    return {"ok": True, "purged_count": purged}
+
 # -----------------------------------------------------------------------------
 # Frontend HTML Dashboard
 # -----------------------------------------------------------------------------

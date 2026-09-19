@@ -160,4 +160,32 @@ class GoogleCalendarService:
             logger.error(f"Failed to delete Google Calendar event {event_id}: {e}")
             return False
 
+    def purge_orphaned_calendar_events(self, valid_event_ids: set) -> int:
+        """Scan upcoming Google Calendar events and delete any clinic appointment not found in valid_event_ids."""
+        if not self.is_available:
+            return 0
+
+        try:
+            now_iso = datetime.now(pytz.utc).isoformat()
+            res = self._service.events().list(
+                calendarId=settings.GOOGLE_CALENDAR_ID,
+                timeMin=now_iso,
+                singleEvents=True,
+                maxResults=100
+            ).execute()
+
+            deleted = 0
+            for item in res.get("items", []):
+                eid = item.get("id")
+                summary = item.get("summary", "")
+                if summary.startswith("Clinic Appointment - ") and eid not in valid_event_ids:
+                    logger.warning(f"Purging orphaned Google Calendar event: {eid} ({summary})")
+                    if self.delete_booking_event(eid):
+                        deleted += 1
+
+            return deleted
+        except Exception as e:
+            logger.error(f"Error purging orphaned calendar events: {e}")
+            return 0
+
 calendar_service = GoogleCalendarService()
