@@ -51,8 +51,7 @@ def run_simulation():
         print("❌ No free slots available for testing.")
         return
 
-    chosen_slot_raw = slots_data["slots"][0]
-    chosen_slot = chosen_slot_raw.split(" ")[0]
+    chosen_slot = slots_data["slots"][0]
     test_phone = "+919876543210"
     test_name = "Manoj Kumar"
 
@@ -96,7 +95,7 @@ def run_simulation():
     res_slots2 = client.get("/api/voice/slots")
     slots2 = res_slots2.json().get("slots", [])
     if len(slots2) > 0:
-        token_slot = slots2[0].split(" ")[0]
+        token_slot = slots2[0]
         token_phone = "+919811122233"
         token_patient = "Priya Sharma"
 

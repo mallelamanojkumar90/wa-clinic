@@ -18,6 +18,18 @@ from app.scheduler import release_expired_holds
 init_db()
 client = TestClient(app)
 
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_test_appointments():
+    with db_session() as session:
+        session.query(Appointment).filter(
+            Appointment.phone.in_(["919811122233", "919833344455"])
+        ).delete()
+    yield
+    with db_session() as session:
+        session.query(Appointment).filter(
+            Appointment.phone.in_(["919811122233", "919833344455"])
+        ).delete()
+
 def test_health_check_voice_and_razorpay():
     """Verify health endpoint includes Voice AI and Razorpay status."""
     res = client.get("/")
@@ -29,7 +41,6 @@ def test_health_check_voice_and_razorpay():
 
 def test_voice_slots_endpoint():
     """Verify /api/voice/slots returns slots with spoken_text formatted for speech synthesis."""
-    seed_slots_if_needed()
     res = client.get("/api/voice/slots")
     assert res.status_code == 200
     data = res.json()
@@ -37,6 +48,16 @@ def test_voice_slots_endpoint():
     assert "spoken_text" in data
     assert "Dr. Rao" in data["spoken_text"]
     assert len(data["slots"]) > 0
+
+def test_voice_slots_date_queries():
+    """Verify slots endpoint handles generic queries, today, and tomorrow cleanly."""
+    res_generic = client.get("/api/voice/slots?date={date}")
+    assert res_generic.status_code == 200
+    assert "Dr. Rao" in res_generic.json()["spoken_text"]
+
+    res_slots_q = client.get("/api/voice/slots?date=can i know the available slots")
+    assert res_slots_q.status_code == 200
+    assert "Dr. Rao" in res_slots_q.json()["spoken_text"]
 
 def test_voice_booking_direct_mode():
     """Test voice booking when advance payment is disabled (direct instant confirmation)."""

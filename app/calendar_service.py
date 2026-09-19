@@ -82,8 +82,8 @@ class GoogleCalendarService:
                 busy_ranges.append((b_start, b_end))
 
             free_slots = []
-            # Generate expected clinic operating slots
-            for day_offset in range(1, days_ahead + 1):
+            # Generate expected clinic operating slots (starting from today if slots remain)
+            for day_offset in range(0, days_ahead + 1):
                 target_date = (now + timedelta(days=day_offset)).date()
                 if target_date.weekday() not in CLINIC_DAYS_OF_WEEK:
                     continue  # Clinic closed on Sundays

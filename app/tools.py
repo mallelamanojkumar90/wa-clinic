@@ -31,40 +31,49 @@ def seed_slots_if_needed():
             Appointment.slot < now
         ).delete()
 
-        # Seed next 3 business days (Mon-Sat)
-        for day in range(1, 4):
+        # Fetch existing upcoming slots in ONE query to avoid 15 network roundtrips
+        existing_rows = session.query(Appointment.slot).filter(
+            Appointment.slot >= now.replace(hour=0, minute=0, second=0)
+        ).all()
+        existing_set = {_to_clinic_tz(r[0]).strftime("%Y-%m-%d %H:%M") for r in existing_rows}
+
+        # Seed today + next 3 business days (Mon-Sat)
+        for day in range(0, 4):
             target_date = (now + timedelta(days=day)).date()
             if target_date.weekday() == 6:  # Skip Sunday
                 continue
             for hour in (10, 11, 12, 17, 18):
                 from datetime import time as dt_time
                 slot_dt = tz.localize(datetime.combine(target_date, dt_time(hour, 0, 0)))
-                existing = session.query(Appointment).filter_by(slot=slot_dt).first()
-                if not existing:
-                    session.add(Appointment(patient_name="", phone="", slot=slot_dt, status="free"))
+                if slot_dt > now:
+                    key = slot_dt.strftime("%Y-%m-%d %H:%M")
+                    if key not in existing_set:
+                        session.add(Appointment(patient_name="", phone="", slot=slot_dt, status="free"))
 
 def get_free_slots() -> List[str]:
     """Retrieve available appointment slots (from Google Calendar if active, or DB)."""
-    seed_slots_if_needed()
     now = datetime.now(_get_tz())
-
-    # Get all slots currently booked in the database to prevent conflict
-    with db_session() as session:
-        booked_rows = session.query(Appointment).filter(
-            Appointment.status == "booked",
-            Appointment.slot > now
-        ).all()
-        booked_isos = {_to_clinic_tz(b.slot).strftime("%Y-%m-%dT%H:%M:%S") for b in booked_rows}
 
     # 1. If Google Calendar is active, query live availability and exclude DB booked slots
     if calendar_service.is_available:
-        cal_slots = calendar_service.get_free_slots(days_ahead=3)
-        if cal_slots:
-            filtered = [display for iso, display in cal_slots if iso not in booked_isos]
-            if filtered:
-                return filtered
+        try:
+            cal_slots = calendar_service.get_free_slots(days_ahead=3)
+            if cal_slots:
+                with db_session() as session:
+                    booked_rows = session.query(Appointment).filter(
+                        Appointment.status == "booked",
+                        Appointment.slot > now
+                    ).all()
+                    booked_isos = {_to_clinic_tz(b.slot).strftime("%Y-%m-%dT%H:%M:%S") for b in booked_rows}
+
+                filtered = [display for iso, display in cal_slots if iso not in booked_isos]
+                if filtered:
+                    return filtered
+        except Exception as e:
+            logger.warning(f"Google Calendar slots query error: {e}. Falling back to DB.")
 
     # 2. Database slot fallback
+    seed_slots_if_needed()
     with db_session() as session:
         rows = session.query(Appointment).filter(
             Appointment.status == "free",
