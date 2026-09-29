@@ -17,7 +17,7 @@ def _to_clinic_tz(d):
     if isinstance(d, str):
         d = datetime.fromisoformat(d)
     if d.tzinfo is None:
-        d = pytz.utc.localize(d)
+        d = _get_tz().localize(d)
     return d.astimezone(_get_tz())
 
 def seed_slots_if_needed():
@@ -31,11 +31,14 @@ def seed_slots_if_needed():
             Appointment.slot < now
         ).delete()
 
-        # Fetch existing upcoming slots in ONE query to avoid 15 network roundtrips
-        existing_rows = session.query(Appointment.slot).filter(
-            Appointment.slot >= now.replace(hour=0, minute=0, second=0)
-        ).all()
-        existing_set = {_to_clinic_tz(r[0]).strftime("%Y-%m-%d %H:%M") for r in existing_rows}
+        # Fetch all existing slots to avoid SQLite datetime string comparison mismatches
+        existing_rows = session.query(Appointment.slot).all()
+        existing_set = set()
+        for r in existing_rows:
+            try:
+                existing_set.add(_to_clinic_tz(r[0]).strftime("%Y-%m-%d %H:%M"))
+            except Exception:
+                pass
 
         # Seed today + next 3 business days (Mon-Sat)
         for day in range(0, 4):

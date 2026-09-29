@@ -157,8 +157,15 @@ def process_patient_message(phone: str, text: str, msg_id: str, audio_id: Option
             send_message(phone, emergency_reply)
             return
 
-        # 3b. Clinic Information Fast-Path (Deterministic info in sub-100ms, bypasses LLM)
-        if triage.intent == "clinic_info" and not any(w in text.lower() for w in ["book", "cancel", "slot", "repu", "kal"]):
+        # Check if text contains Indic scripts (Telugu, Devanagari) or conversational intent
+        has_indic_script = any('\u0c00' <= char <= '\u0c7f' or '\u0900' <= char <= '\u097f' for char in text)
+        is_direct_button_or_static_info = text in (
+            "What are the clinic timings and consultation details?",
+            "What is the clinic timing and address?"
+        ) or (triage.intent == "clinic_info" and not has_indic_script and not any(w in text.lower() for w in ["book", "cancel", "slot", "repu", "kal", "dr", "doctor", "consultation"]))
+
+        # 3b. Clinic Information Fast-Path (Deterministic info for static info queries / buttons)
+        if is_direct_button_or_static_info:
             info_reply = (
                 "🏥 *Dr. Rao's Clinic Information*\n\n"
                 "⏰ *Timings*: Mon–Sat: 10:00 AM – 01:00 PM & 05:00 PM – 07:00 PM (Closed Sundays)\n"
@@ -171,8 +178,8 @@ def process_patient_message(phone: str, text: str, msg_id: str, audio_id: Option
             send_welcome_action_buttons(phone, "Quick options:")
             return
 
-        # 3c. Pure Slot Inquiry Fast-Path (Instantly deliver slot text + interactive list picker)
-        if triage.intent == "check_slots" and not any(w in text.lower() for w in ["book", "my name is", "peru", "naam"]):
+        # 3c. Pure Slot Inquiry Fast-Path (For direct WhatsApp button clicks like "Show available appointment slots")
+        if text.strip() == "Show available appointment slots":
             free_slots = get_free_slots()
             if free_slots:
                 slots_text = (
