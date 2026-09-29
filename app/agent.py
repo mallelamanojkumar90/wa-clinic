@@ -1,7 +1,7 @@
 """Multi-lingual AI Receptionist Agent powered by OpenRouter / OpenAI."""
 import json
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from openai import OpenAI
 from app.config import settings
 from app.database import db_session
@@ -55,7 +55,7 @@ def save_chat_message(phone: str, role: str, content: str):
     except Exception as e:
         logger.error(f"Failed to persist chat message: {e}")
 
-def reply(user_text: str, phone: str) -> str:
+def reply(user_text: str, phone: str, triage: Optional[Any] = None) -> str:
     """Process incoming patient message and generate AI response with tool calling."""
     clean_phone = phone.lstrip("+")
 
@@ -66,9 +66,13 @@ def reply(user_text: str, phone: str) -> str:
     save_chat_message(clean_phone, "user", user_text)
     history.append({"role": "user", "content": user_text})
 
+    triage_hint = ""
+    if triage and hasattr(triage, "intent"):
+        triage_hint = f"\n[System-One Triage Context: Intent={triage.intent}, Urgency={triage.urgency}]"
+
     system_msg = {
         "role": "system",
-        "content": SYSTEM_PROMPT + f"\n\nCurrent Patient Phone: +{clean_phone}"
+        "content": SYSTEM_PROMPT + f"\n\nCurrent Patient Phone: +{clean_phone}" + triage_hint
     }
     messages = [system_msg] + history[-10:]
 

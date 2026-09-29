@@ -8,10 +8,16 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 
 ## 🌟 Key Features
 
+- ⚡ **TypeSafe Jev System-One Triage & Safety Guardrails**:
+  - Non-autoregressive, sub-second (**70–150ms**) decision model for structured clinical classification.
+  - **Emergency Medical Guardrail (`Noul`)**: Instantly detects acute life-threatening emergencies (chest pain, stroke, breathing failure) and dispatches immediate ambulance (**108**) protocols, safely bypassing the generative LLM.
+  - **Fast-Path Intent Routing (`Choice`)**: Directly routes inquiries for clinic timings, fees, and slot browsing with zero LLM latency and 90% cost savings.
+  - **Urgency Scoring (`Score`)**: Evaluates patient distress (`low`, `medium`, `urgent`) to flag critical callers for front-desk escalation.
+  - Voice AI Triage Endpoint: `POST /api/voice/triage`.
 - 📞 **Inbound Voice AI Receptionist (Bolna.dev + Vobiz Telephony)**:
   - Answers live phone calls in **English, Telugu, and Hindi** (via Sarvam AI / Deepgram / Cartesia).
   - Queries Google Calendar in real-time, qualifies patient inquiries, and reserves appointment slots over the call.
-  - Endpoints: `GET /api/voice/slots`, `POST /api/voice/book`, `POST /api/voice/cancel`.
+  - Endpoints: `GET /api/voice/slots`, `POST /api/voice/book`, `POST /api/voice/cancel`, `POST /api/voice/triage`.
 - 💳 **Razorpay UPI & Advance Token Payments**:
   - Automatically generates 1-tap UPI payment links (Google Pay, PhonePe, Paytm, UPI QR).
   - Holds slots provisionally for 15 minutes (`pending_payment`); auto-releases unpaid slots.

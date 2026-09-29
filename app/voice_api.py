@@ -13,6 +13,7 @@ from app.tools import get_free_slots, book_slot, cancel_booking, _to_clinic_tz, 
 from app.calendar_service import calendar_service
 from app.whatsapp import send_message
 from app.razorpay_service import razorpay_service
+from app.jev_service import jev_service
 
 logger = logging.getLogger(__name__)
 
@@ -434,3 +435,34 @@ def cancel_voice_booking(
     else:
         spoken_text = "I couldn't find an active appointment under that phone number. Could you please confirm the 10-digit number you booked with?"
         return {"status": "not_found", "message": result, "spoken_text": spoken_text}
+
+class VoiceTriageRequest(BaseModel):
+    utterance: str = Field(..., description="Spoken utterance or inquiry from caller")
+    phone: Optional[str] = Field(None, description="Caller's phone number if available")
+
+@router.post("/triage")
+def voice_triage(
+    payload: VoiceTriageRequest,
+    x_voice_secret: Optional[str] = Header(None)
+):
+    """Sub-second TypeSafe Jev System-One triage for inbound voice calls (Bolna/Vobiz)."""
+    _verify_voice_secret(x_voice_secret)
+    triage = jev_service.triage_patient_message(payload.utterance)
+    
+    suggested_action = "human_emergency_transfer" if triage.is_emergency else triage.intent
+    
+    emergency_speech = (
+        "This sounds like an urgent medical situation. Please hang up and immediately dial 1 0 8 for an emergency ambulance, "
+        "or proceed directly to the nearest hospital emergency room. I will also notify our front desk."
+    )
+    
+    return {
+        "is_emergency": triage.is_emergency,
+        "intent": triage.intent,
+        "urgency": triage.urgency,
+        "confidence": triage.confidence,
+        "source": triage.source,
+        "should_escalate_to_human": triage.is_emergency or triage.urgency == "urgent",
+        "suggested_action": suggested_action,
+        "emergency_speech": emergency_speech if triage.is_emergency else None
+    }

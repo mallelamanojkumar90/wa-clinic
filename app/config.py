@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     ENABLE_VOICE_AI: bool = True
     VOICE_API_SECRET: Optional[str] = None  # Optional shared secret header for Bolna webhook calls
 
+    # TypeSafe Jev System-One Decision Engine Settings
+    ENABLE_JEV: bool = True
+    TYPESAFE_API_KEY: Optional[str] = None
+
     # Database Settings (Supabase / Postgres or local SQLite fallback)
     DATABASE_URL: Optional[str] = None
 

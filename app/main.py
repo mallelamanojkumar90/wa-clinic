@@ -10,7 +10,8 @@ from app.database import init_db, db_session
 from app.models import ProcessedWebhook
 from app.calendar_service import calendar_service
 from app.security import verify_meta_signature
-from app.agent import reply
+from app.agent import reply, save_chat_message
+from app.jev_service import jev_service
 from app.whatsapp import send_message, mark_as_read, send_slots_interactive_menu, send_welcome_action_buttons
 from app.transcription import download_whatsapp_media, transcribe_audio
 from app.scheduler import start_scheduler, stop_scheduler
@@ -65,9 +66,10 @@ def health_check():
         "reminders_enabled": settings.ENABLE_REMINDERS,
         "audio_transcription": bool(settings.GROQ_API_KEY or settings.OPENAI_API_KEY),
         "voice_ai_enabled": settings.ENABLE_VOICE_AI,
-        "voice_endpoints": ["/api/voice/slots", "/api/voice/book", "/api/voice/cancel"],
+        "voice_endpoints": ["/api/voice/slots", "/api/voice/book", "/api/voice/cancel", "/api/voice/triage"],
         "razorpay_enabled": settings.ENABLE_RAZORPAY,
         "advance_token_inr": settings.ADVANCE_TOKEN_AMOUNT_INR,
+        "jev_system_one_triage": jev_service.is_available,
         "dashboard_url": "/dashboard",
         "model": settings.MODEL
     }
@@ -134,23 +136,75 @@ def process_patient_message(phone: str, text: str, msg_id: str, audio_id: Option
         if not text:
             return
 
-        # 3. Handle Greeting with Quick Action Buttons
+        # 3. TypeSafe Jev System-One Decision Triage & Fast Routing (70-150ms)
+        triage = jev_service.triage_patient_message(text)
+        logger.info(
+            f"[Jev Triage] +{phone} (source={triage.source}): "
+            f"emergency={triage.is_emergency}, intent={triage.intent}, urgency={triage.urgency}"
+        )
+
+        # 3a. Emergency Fast-Path (Life-safety protocol - immediately bypasses LLM)
+        if triage.is_emergency or triage.intent == "emergency":
+            emergency_reply = (
+                "⚠️ *URGENT MEDICAL NOTICE / అత్యవసర నోటీసు*\n\n"
+                "If you or the patient are experiencing a life-threatening medical emergency "
+                "(e.g., severe chest pain, breathing difficulty, uncontrollable bleeding, stroke symptoms, or sudden collapse):\n\n"
+                "🚨 **IMMEDIATELY CALL 108 (Ambulance)** or go to the nearest Hospital Emergency Room.\n\n"
+                "మీరు లేదా రోగి తీవ్రమైన అత్యవసర పరిస్థితిలో ఉంటే, వెంటనే **108 (అంబులెన్స్)** కి కాల్ చేయండి లేదా దగ్గరలోని ఎమర్జెన్సీ ఆసుపత్రికి వెళ్లండి.\n\n"
+                "🏥 Dr. Rao's Clinic Emergency Desk: +91 98765 43210"
+            )
+            save_chat_message(phone, "assistant", emergency_reply)
+            send_message(phone, emergency_reply)
+            return
+
+        # 3b. Clinic Information Fast-Path (Deterministic info in sub-100ms, bypasses LLM)
+        if triage.intent == "clinic_info" and not any(w in text.lower() for w in ["book", "cancel", "slot", "repu", "kal"]):
+            info_reply = (
+                "🏥 *Dr. Rao's Clinic Information*\n\n"
+                "⏰ *Timings*: Mon–Sat: 10:00 AM – 01:00 PM & 05:00 PM – 07:00 PM (Closed Sundays)\n"
+                "🩺 *Consultation Fee*: ₹500 (Advance Token: ₹200 via UPI)\n"
+                "📍 *Address*: Dr. Rao's Clinic, Main Road, Hyderabad\n\n"
+                "Would you like to check today's or tomorrow's available appointment slots?"
+            )
+            save_chat_message(phone, "assistant", info_reply)
+            send_message(phone, info_reply)
+            send_welcome_action_buttons(phone, "Quick options:")
+            return
+
+        # 3c. Pure Slot Inquiry Fast-Path (Instantly deliver slot text + interactive list picker)
+        if triage.intent == "check_slots" and not any(w in text.lower() for w in ["book", "my name is", "peru", "naam"]):
+            free_slots = get_free_slots()
+            if free_slots:
+                slots_text = (
+                    "📅 *Available Appointment Slots:*\n\n"
+                    + "\n".join([f"• {s}" for s in free_slots[:5]])
+                    + "\n\nPlease select a slot from the list below or reply with your preferred time and full name:"
+                )
+                save_chat_message(phone, "assistant", slots_text)
+                send_message(phone, slots_text)
+                try:
+                    send_slots_interactive_menu(phone, free_slots[:10])
+                except Exception as e:
+                    logger.debug(f"Could not send interactive slots menu: {e}")
+                return
+
+        # 4. Handle Greeting with Quick Action Buttons
         is_greeting = text.lower().strip() in ("hi", "hello", "hey", "namaste", "namaskaram", "namaskaramu", "start")
         if is_greeting:
-            bot_reply = reply(text, phone)
+            bot_reply = reply(text, phone, triage=triage)
             send_message(phone, bot_reply)
             send_welcome_action_buttons(phone, "Quick options:")
             return
 
-        # 4. Generate multi-lingual AI response
-        logger.info(f"Generating AI reply for +{phone}: '{text}'")
-        bot_reply = reply(text, phone)
+        # 5. Generate multi-lingual AI response (enriched with Jev System-One Triage)
+        logger.info(f"Generating AI reply for +{phone}: '{text}' [Triage: {triage.intent}/{triage.urgency}]")
+        bot_reply = reply(text, phone, triage=triage)
 
-        # 5. Deliver reply to WhatsApp
+        # 6. Deliver reply to WhatsApp
         send_message(phone, bot_reply)
 
-        # 6. If user inquired about slots, also deliver interactive slot selection menu
-        asked_slots = any(w in text.lower() for w in ["slot", "available", "schedule", "free", "appointment timings", "repu", "kal"]) and "cancel" not in text.lower()
+        # 7. If user inquired about slots, also deliver interactive slot selection menu
+        asked_slots = (triage.intent == "check_slots" or any(w in text.lower() for w in ["slot", "available", "schedule", "free", "appointment timings", "repu", "kal"])) and "cancel" not in text.lower()
         if asked_slots:
             try:
                 free_slots = get_free_slots()
