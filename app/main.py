@@ -31,10 +31,23 @@ logger = logging.getLogger("clinic_receptionist")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize database schema
+    # Startup: Initialize database schema with retry resilience
     logger.info("Initializing database tables...")
-    init_db()
-    logger.info(f"Database ready: {'PostgreSQL (Supabase)' if settings.is_postgres else 'SQLite (Local)'}")
+    try:
+        db_ready = init_db()
+        if db_ready:
+            logger.info(f"Database ready: {'PostgreSQL (Supabase)' if settings.is_postgres else 'SQLite (Local)'}")
+        else:
+            logger.warning(
+                "Database could not be initialized during startup. "
+                "The database may still be waking up. The server will start in degraded mode and retry on demand."
+            )
+    except Exception as exc:
+        logger.error(
+            f"Unexpected error during database initialization: {exc}. "
+            "Continuing startup to allow health checks and incoming requests to function."
+        )
+
     logger.info(f"Google Calendar status: {'Active' if calendar_service.is_available else 'Disabled (using DB slots)'}")
 
     # Start automated appointment reminder scheduler
