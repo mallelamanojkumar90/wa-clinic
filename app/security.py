@@ -33,9 +33,9 @@ async def verify_meta_signature(request: Request) -> bytes:
             detail="Invalid signature format"
         )
 
-    expected_hash = parts[1]
+    expected_hash = parts[1].strip()
     computed_hash = hmac.new(
-        key=settings.META_APP_SECRET.encode("utf-8"),
+        key=settings.META_APP_SECRET.strip().encode("utf-8"),
         msg=body,
         digestmod=hashlib.sha256
     ).hexdigest()

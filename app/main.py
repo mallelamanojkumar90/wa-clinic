@@ -252,6 +252,27 @@ async def meta_webhook_handler(
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+
+            # Log message delivery statuses (sent, delivered, read, failed)
+            statuses = value.get("statuses", [])
+            for st in statuses:
+                recipient = st.get("recipient_id")
+                status_val = st.get("status")
+                wamid = st.get("id")
+                errors = st.get("errors")
+                if errors:
+                    for err in errors:
+                        err_code = err.get("code")
+                        err_title = err.get("title")
+                        err_msg = err.get("message")
+                        err_details = err.get("error_data", {}).get("details", "")
+                        logger.error(
+                            f"[Meta Webhook Status] Message {wamid} to +{recipient} FAILED: "
+                            f"Code {err_code} - {err_title}: {err_msg} ({err_details})"
+                        )
+                else:
+                    logger.info(f"[Meta Webhook Status] Message {wamid} to +{recipient} -> {status_val}")
+
             messages = value.get("messages", [])
 
             for msg in messages:
