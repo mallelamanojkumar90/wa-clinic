@@ -94,10 +94,23 @@ def meta_webhook_verification(
     hub_challenge: str = Query("", alias="hub.challenge"),
 ):
     """Meta Developer Webhook Verification Handshake."""
+    # Friendly response if opened directly in a browser without Meta handshake params
+    if not hub_mode and not hub_verify_token:
+        return {
+            "status": "ready",
+            "service": "WhatsApp Cloud API Webhook Listener",
+            "message": "This endpoint is live and waiting for Meta's verification handshake.",
+            "usage": "Paste this URL into Meta Developer Dashboard -> WhatsApp -> Configuration -> Callback URL, with your configured Verify Token."
+        }
+
     logger.info(f"Received webhook verification handshake: mode={hub_mode}")
-    if hub_mode == "subscribe" and hub_verify_token == settings.VERIFY_TOKEN:
+    configured_token = (settings.VERIFY_TOKEN or "").strip()
+    received_token = (hub_verify_token or "").strip()
+
+    if hub_mode == "subscribe" and received_token == configured_token:
         logger.info("Webhook verification successful. Echoing challenge.")
         return Response(content=hub_challenge, media_type="text/plain")
+
     logger.warning("Webhook verification failed: token mismatch.")
     return Response(content="Verification token mismatch", status_code=403)
 
