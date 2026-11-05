@@ -49,6 +49,12 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 - 🔒 **Production Security & Idempotency**:
   - Meta `X-Hub-Signature-256` and Razorpay `X-Razorpay-Signature` HMAC-SHA256 signature validation.
   - Deduplication engine prevents duplicate AI replies when webhooks retry.
+- ⏳ **Smart 1-Hour Booking Buffer & Past Slot Auto-Purge**:
+  - Automatically suppresses same-day slots starting within 1 hour (`now + 1 hr`) so patients always have adequate travel notice.
+  - Automatically cleans up expired unbooked (`free`) and cancelled slots from the database.
+- 📐 **Modular Dual-Channel Architecture**:
+  - Clean separation of concerns between **WhatsApp AI Receptionist** (`app/channels/whatsapp/`) and **Telephony Voice AI** (`app/channels/voice/`) with zero file conflicts.
+  - Both channels share the unified clinic foundation in `app/core/` (Supabase, Google Calendar, slot booking engine). Full guide in [`PATH_ARCHITECTURE.md`](file:///c:/Users/malle/wa-clinic-poc/PATH_ARCHITECTURE.md).
 - 🚀 **One-Click Cloud Deployment**:
   - Preconfigured for **Render** (`render.yaml` and `Dockerfile`).
 
@@ -59,31 +65,47 @@ Built with **FastAPI**, **Supabase (PostgreSQL)**, **Google Calendar API**, **Op
 ```text
 wa-clinic/
 ├── app/
-│   ├── config.py           # Pydantic Settings (Supabase, Google Calendar, Meta, Razorpay, Voice AI)
-│   ├── database.py         # SQLAlchemy engine with Supabase Postgres pool (SQLite dev fallback)
-│   ├── models.py           # Models: Appointment, ChatMessage, ProcessedWebhook (with payment & reminder flags)
-│   ├── security.py         # HMAC-SHA256 Meta webhook signature verification
-│   ├── calendar_service.py # Google Calendar API: freebusy queries, event creation & cancellation
-│   ├── tools.py            # AI tools: get_free_slots, book_slot, cancel_booking
-│   ├── agent.py            # Multi-lingual conversational agent loop with tool dispatcher
-│   ├── whatsapp.py         # Meta Cloud API: message sending, interactive buttons, list pickers
-│   ├── transcription.py    # Meta media download & Groq/OpenAI Whisper transcription
-│   ├── scheduler.py        # APScheduler automated 24h/2h reminders & expired hold cleanup
-│   ├── razorpay_service.py # Razorpay UPI payment link creation & HMAC webhook verification
-│   ├── voice_api.py        # Inbound Voice AI Receptionist endpoints for Bolna.dev / Vobiz
-│   ├── dashboard.py        # Front-desk live web dashboard router & UI (/dashboard)
-│   └── main.py             # FastAPI entrypoint, health checks, webhook handlers
+│   ├── channels/
+│   │   ├── whatsapp/                    # 🟢 PATH 1: WHATSAPP RECEPTIONIST
+│   │   │   ├── router.py                # Meta Webhooks: GET & POST /webhook (/api/whatsapp/webhook)
+│   │   │   ├── agent.py                 # Multi-lingual LLM chat agent (Telugu/Hindi/English)
+│   │   │   ├── client.py                # Meta Graph API sender (text, buttons, slot lists)
+│   │   │   ├── transcription.py         # Voice note audio download & Whisper STT
+│   │   │   └── security.py              # Meta HMAC-SHA256 signature verification
+│   │   │
+│   │   └── voice/                       # 🔵 PATH 2: TELEPHONY VOICE AI (Bolna / Vobiz)
+│   │       ├── router.py                # Endpoints: /api/voice/slots, /book, /cancel, /triage
+│   │       └── speech.py                # Natural spoken English phrasing for TTS synthesis
+│   │
+│   ├── core/                            # ⚙️ SHARED CLINIC CORE & ENGINE
+│   │   ├── database.py                  # Supabase PostgreSQL session & connection pool
+│   │   ├── models.py                    # SQLAlchemy Models (Appointment, Chat, Webhook)
+│   │   ├── calendar_service.py          # Google Calendar live sync & event manager
+│   │   ├── tools.py                     # Slot generator (with 1-hr buffer), booking & cancelling
+│   │   ├── jev_service.py               # TypeSafe Jev System-One triage & emergency protocol
+│   │   ├── razorpay_service.py          # UPI advance token payments & 15-min hold release
+│   │   ├── scheduler.py                 # Automated 24h & 2h appointment reminder jobs
+│   │   └── config.py                    # Environment settings & credentials
+│   │
+│   ├── dashboard/                       # 🖥️ CLINIC ADMIN WEB DASHBOARD
+│   │   └── router.py                    # Staff admin portal at /dashboard
+│   │
+│   ├── main.py                          # Unified FastAPI gateway mounting all routers
+│   └── (facade re-exports for 100% backward compatibility)
+│
+├── tests/                               # Automated test suites (28/28 tests passing)
+│   ├── test_jev.py                      # Jev System-One triage test suite (9 tests)
+│   ├── test_production.py               # WhatsApp, Calendar & Dashboard test suite (10 tests)
+│   └── test_voice_and_payment.py        # Voice AI & Razorpay test suite (9 tests)
 ├── scripts/
-│   ├── setup_supabase.sql  # Production Supabase SQL migration script
-│   └── test_voice_agent_simulation.py # End-to-end voice agent call simulator
-├── tests/
-│   ├── test_production.py         # WhatsApp, Calendar & Dashboard test suite
-│   └── test_voice_and_payment.py  # Voice AI & Razorpay test suite
-├── Dockerfile              # Production multi-stage container
-├── render.yaml             # Render one-click blueprint
-├── requirements.txt        # Production Python dependencies
-├── .env.example            # Production environment variable template
-└── app.py                  # CLI chat runner and server entrypoint
+│   ├── setup_supabase.sql               # Production Supabase SQL migration script
+│   └── test_voice_agent_simulation.py   # End-to-end voice agent call simulator
+├── PATH_ARCHITECTURE.md                 # Interactive architectural guide & path mapping
+├── Dockerfile                           # Production multi-stage container
+├── render.yaml                          # Render one-click blueprint
+├── requirements.txt                     # Production Python dependencies
+├── .env.example                         # Production environment variable template
+└── app.py                               # CLI chat runner and server entrypoint
 ```
 
 ---
@@ -247,11 +269,23 @@ It should return `200 OK` with:
 ```json
 {
   "status": "online",
-  "service": "Dr. Rao Clinic WhatsApp AI Receptionist",
-  "version": "2.0.0",
+  "service": "Dr. Rao Clinic Multi-Channel AI Receptionist",
+  "version": "3.0.0",
+  "channels": {
+    "whatsapp": {
+      "name": "WhatsApp AI Receptionist",
+      "webhook_path": "/webhook",
+      "webhook_alias": "/api/whatsapp/webhook",
+      "status": "active"
+    },
+    "voice_ai": {
+      "name": "Telephony Voice AI Receptionist (Bolna/Vobiz)",
+      "enabled": true,
+      "endpoints": ["/api/voice/slots", "/api/voice/book", "/api/voice/cancel", "/api/voice/triage"]
+    }
+  },
   "database": "postgresql (supabase)",
-  "google_calendar_sync": true,
-  "model": "openai/gpt-4o-mini"
+  "google_calendar_sync": true
 }
 ```
 
