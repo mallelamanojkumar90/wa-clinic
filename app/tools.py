@@ -27,7 +27,7 @@ def seed_slots_if_needed():
     with db_session() as session:
         # Clean up unbooked slots in the past
         session.query(Appointment).filter(
-            Appointment.status == "free",
+            Appointment.status.in_(["free", "cancelled"]),
             Appointment.slot < now
         ).delete()
 
@@ -48,7 +48,8 @@ def seed_slots_if_needed():
             for hour in (10, 11, 12, 17, 18):
                 from datetime import time as dt_time
                 slot_dt = tz.localize(datetime.combine(target_date, dt_time(hour, 0, 0)))
-                if slot_dt > now:
+                # Minimum 1 hour advance booking notice
+                if slot_dt > now + timedelta(hours=1):
                     key = slot_dt.strftime("%Y-%m-%d %H:%M")
                     if key not in existing_set:
                         session.add(Appointment(patient_name="", phone="", slot=slot_dt, status="free"))
@@ -56,6 +57,8 @@ def seed_slots_if_needed():
 def get_free_slots() -> List[str]:
     """Retrieve available appointment slots (from Google Calendar if active, or DB)."""
     now = datetime.now(_get_tz())
+    # Minimum 1 hour lead time to prevent offering imminent/past slots
+    lead_cutoff = now + timedelta(hours=1)
 
     # 1. If Google Calendar is active, query live availability and exclude DB booked slots
     if calendar_service.is_available:
@@ -80,7 +83,7 @@ def get_free_slots() -> List[str]:
     with db_session() as session:
         rows = session.query(Appointment).filter(
             Appointment.status.in_(["free", "cancelled"]),
-            Appointment.slot > now
+            Appointment.slot > lead_cutoff
         ).order_by(Appointment.slot).all()
 
         out = []

@@ -92,7 +92,7 @@ class GoogleCalendarService:
                     slot_dt = self._tz.localize(datetime.combine(target_date, time(hour, 0)))
                     slot_end = slot_dt + timedelta(minutes=45)
 
-                    if slot_dt <= now:
+                    if slot_dt <= now + timedelta(hours=1):
                         continue
 
                     # Check collision with busy ranges
