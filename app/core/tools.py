@@ -1,0 +1,226 @@
+"""Receptionist tools callable by the LLM agent: get_free_slots, book_slot, cancel_booking."""
+import logging
+from datetime import datetime, timedelta
+from typing import List
+import pytz
+from app.core.config import settings
+from app.core.database import db_session
+from app.core.models import Appointment
+from app.core.calendar_service import calendar_service
+
+logger = logging.getLogger(__name__)
+
+def _get_tz():
+    return pytz.timezone(settings.CLINIC_TIMEZONE)
+
+def _to_clinic_tz(d):
+    if isinstance(d, str):
+        d = datetime.fromisoformat(d)
+    if d.tzinfo is None:
+        d = _get_tz().localize(d)
+    return d.astimezone(_get_tz())
+
+def seed_slots_if_needed():
+    """Ensure upcoming slots exist in the database."""
+    tz = _get_tz()
+    now = datetime.now(tz)
+    with db_session() as session:
+        # Clean up unbooked slots in the past
+        session.query(Appointment).filter(
+            Appointment.status.in_(["free", "cancelled"]),
+            Appointment.slot < now
+        ).delete()
+
+        # Fetch all existing slots to avoid SQLite datetime string comparison mismatches
+        existing_rows = session.query(Appointment.slot).all()
+        existing_set = set()
+        for r in existing_rows:
+            try:
+                existing_set.add(_to_clinic_tz(r[0]).strftime("%Y-%m-%d %H:%M"))
+            except Exception:
+                pass
+
+        # Seed today + next 3 business days (Mon-Sat)
+        for day in range(0, 4):
+            target_date = (now + timedelta(days=day)).date()
+            if target_date.weekday() == 6:  # Skip Sunday
+                continue
+            for hour in (10, 11, 12, 17, 18):
+                from datetime import time as dt_time
+                slot_dt = tz.localize(datetime.combine(target_date, dt_time(hour, 0, 0)))
+                # Minimum 1 hour advance booking notice
+                if slot_dt > now + timedelta(hours=1):
+                    key = slot_dt.strftime("%Y-%m-%d %H:%M")
+                    if key not in existing_set:
+                        session.add(Appointment(patient_name="", phone="", slot=slot_dt, status="free"))
+
+def get_free_slots() -> List[str]:
+    """Retrieve available appointment slots (from Google Calendar if active, or DB)."""
+    now = datetime.now(_get_tz())
+    # Minimum 1 hour lead time to prevent offering imminent/past slots
+    lead_cutoff = now + timedelta(hours=1)
+
+    # 1. If Google Calendar is active, query live availability and exclude DB booked slots
+    if calendar_service.is_available:
+        try:
+            cal_slots = calendar_service.get_free_slots(days_ahead=3)
+            if cal_slots:
+                with db_session() as session:
+                    booked_rows = session.query(Appointment).filter(
+                        Appointment.status == "booked",
+                        Appointment.slot > now
+                    ).all()
+                    booked_isos = {_to_clinic_tz(b.slot).strftime("%Y-%m-%dT%H:%M:%S") for b in booked_rows}
+
+                filtered = [display for iso, display in cal_slots if iso not in booked_isos]
+                if filtered:
+                    return filtered
+        except Exception as e:
+            logger.warning(f"Google Calendar slots query error: {e}. Falling back to DB.")
+
+    # 2. Database slot fallback
+    seed_slots_if_needed()
+    with db_session() as session:
+        rows = session.query(Appointment).filter(
+            Appointment.status.in_(["free", "cancelled"]),
+            Appointment.slot > lead_cutoff
+        ).order_by(Appointment.slot).all()
+
+        out = []
+        for appt in rows:
+            local_d = _to_clinic_tz(appt.slot)
+            iso_str = local_d.strftime("%Y-%m-%dT%H:%M:%S")
+            pretty_str = local_d.strftime("%a %d %b %I:%M %p")
+            out.append(f"{iso_str} ({pretty_str})")
+        return out
+
+def book_slot(slot: str, name: str, phone: str) -> str:
+    """Book an appointment for a patient and sync with Google Calendar."""
+    clean_phone = phone.lstrip("+")
+    now = datetime.now(_get_tz())
+    want = slot.replace(",", "").replace("  ", " ").lower().strip()
+
+    with db_session() as session:
+        # Retrieve all available upcoming slots
+        rows = session.query(Appointment).filter(
+            Appointment.status.in_(["free", "cancelled"]),
+            Appointment.slot > now
+        ).all()
+
+        matched_slot = None
+        for appt in rows:
+            local_d = _to_clinic_tz(appt.slot)
+            iso_str = local_d.strftime("%Y-%m-%dT%H:%M:%S")
+            pretty = local_d.strftime("%a %d %b %I:%M %p").replace(", ", " ").lower()
+
+            if want in iso_str.lower() or want in pretty or pretty in want:
+                matched_slot = appt
+                break
+
+        if not matched_slot:
+            available_preview = []
+            for a in rows[:5]:
+                local_d = _to_clinic_tz(a.slot)
+                available_preview.append(local_d.strftime("%a %d %b %I:%M %p"))
+            return f"Slot '{slot}' not found or already booked. Available: {available_preview}"
+
+        # Synchronize with Google Calendar if enabled
+        g_event_id = None
+        local_dt = _to_clinic_tz(matched_slot.slot)
+        matched_slot_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        pretty_slot = local_dt.strftime("%a %d %b %I:%M %p")
+
+        if calendar_service.is_available:
+            g_event_id = calendar_service.create_booking_event(name, clean_phone, matched_slot_iso)
+
+        # Update database record atomically
+        matched_slot.patient_name = name
+        matched_slot.phone = clean_phone
+        matched_slot.status = "booked"
+        matched_slot.notes = None
+        matched_slot.google_event_id = g_event_id
+
+        return f"Booked {name} for {pretty_slot}"
+
+def cancel_booking(phone: str) -> str:
+    """Cancel patient's existing booking, delete from Google Calendar, and update status to cancelled."""
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) < 10:
+        return "Please provide a valid 10-digit phone number."
+
+    tz = _get_tz()
+    now = datetime.now(tz)
+
+    # Support matching with or without '91' country code
+    phone_variants = [digits]
+    if digits.startswith("91") and len(digits) > 10:
+        phone_variants.append(digits[2:])
+    elif len(digits) == 10:
+        phone_variants.append(f"91{digits}")
+
+    with db_session() as session:
+        appt = session.query(Appointment).filter(
+            Appointment.phone.in_(phone_variants),
+            Appointment.status.in_(["booked", "pending_payment"])
+        ).order_by(Appointment.slot.desc()).first()
+
+        if not appt:
+            return "No active booking found for this phone number."
+
+        # Remove from Google Calendar if event exists
+        if appt.google_event_id and calendar_service.is_available:
+            try:
+                calendar_service.delete_booking_event(appt.google_event_id)
+            except Exception as e:
+                logger.error(f"Error removing Google Calendar event during cancel: {e}")
+
+        local_dt = _to_clinic_tz(appt.slot)
+        pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p").replace(" 0", " ")
+
+        # Retain patient details and mark status as 'cancelled' for dashboard tracking
+        appt.status = "cancelled"
+        appt.notes = f"{appt.notes or ''} [Cancelled via AI on {now.strftime('%d %b %I:%M %p')}]".strip()
+        appt.google_event_id = None
+
+        return f"Your appointment for {pretty_slot} has been successfully cancelled."
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_free_slots",
+            "description": "List upcoming free clinic appointment slots",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "book_slot",
+            "description": "Book a clinic appointment for a patient",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slot": {"type": "string", "description": "The exact slot string from get_free_slots"},
+                    "name": {"type": "string", "description": "Full name of the patient"},
+                    "phone": {"type": "string", "description": "Patient's phone number with country code"}
+                },
+                "required": ["slot", "name", "phone"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_booking",
+            "description": "Cancel a patient's booked appointment by phone number",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string", "description": "Patient phone number"}
+                },
+                "required": ["phone"]
+            }
+        }
+    }
+]
