@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # WhatsApp Cloud API Settings
     WHATSAPP_TOKEN: str = ""
     WHATSAPP_PHONE_ID: str = ""
-    VERIFY_TOKEN: str = "manojkumar"
+    VERIFY_TOKEN: str = ""  # Must be set; an empty token rejects every Meta handshake
     META_APP_SECRET: Optional[str] = None  # For X-Hub-Signature-256 HMAC verification
 
     # Automated Reminders Settings
@@ -44,16 +44,29 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_ID: str = "primary"
     CLINIC_TIMEZONE: str = "Asia/Kolkata"
 
+    # Clinic Details (used in patient-facing messages)
+    CLINIC_ADDRESS: str = "Dr. Rao's Clinic, Road No. 36, Jubilee Hills, Hyderabad"
+    CLINIC_MAPS_URL: str = "https://maps.google.com/?q=Dr+Raos+Clinic+Hyderabad"
+    CLINIC_EMERGENCY_PHONE: str = ""  # Shown in emergency replies only when set
+
     # Server & Dashboard Settings
+    # APP_ENV=production makes webhooks and the voice API reject requests when their secret is missing,
+    # and disables the dashboard while DASHBOARD_PIN is still the default.
+    APP_ENV: str = "development"
     PORT: int = 8000
     DEBUG: bool = False
     DASHBOARD_PIN: str = "1234"
+    SESSION_SECRET: Optional[str] = None  # Signs dashboard session cookies; random per process if unset
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @property
+    def is_production(self) -> bool:
+        return self.APP_ENV.strip().lower() in ("production", "prod")
 
     @property
     def is_postgres(self) -> bool:

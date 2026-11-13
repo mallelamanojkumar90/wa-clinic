@@ -7,20 +7,12 @@ from app.core.config import settings
 from app.core.database import db_session
 from app.core.models import Appointment
 from app.core.calendar_service import calendar_service
+# Shared helpers: naive datetimes from SQLite are clinic wall-clock time, not UTC.
+from app.core.tools import _get_tz, _to_clinic_tz, cleared_slot_fields
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
-
-def _get_tz():
-    return pytz.timezone(settings.CLINIC_TIMEZONE)
-
-def _to_clinic_tz(d):
-    if d is None:
-        return None
-    if d.tzinfo is None:
-        d = pytz.utc.localize(d)
-    return d.astimezone(_get_tz())
 
 def check_and_send_reminders() -> int:
     """
@@ -51,9 +43,10 @@ def check_and_send_reminders() -> int:
 
             # 1. 24-hour reminder (within 2h to 24h window)
             if 2.0 < diff_hours <= 24.0 and not appt.reminder_24h_sent:
+                day_word = "today" if local_slot.date() == now.date() else "tomorrow"
                 text = (
                     f"⏰ *Dr. Rao's Clinic Reminder*\n\n"
-                    f"Hello {patient_name}, you have an appointment with Dr. Rao tomorrow at *{pretty_time}*.\n\n"
+                    f"Hello {patient_name}, you have an appointment with Dr. Rao {day_word} at *{pretty_time}*.\n\n"
                     f"📍 Dr. Rao's Clinic\n"
                     f"If you need to cancel or reschedule, simply reply to this message."
                 )
@@ -103,23 +96,27 @@ def release_expired_holds() -> int:
             local_slot = _to_clinic_tz(appt.slot)
             pretty_time = local_slot.strftime("%a %d %b, %I:%M %p")
 
+            event_id = appt.google_event_id
+
+            # Revert slot to free, but only if it is still an unpaid hold: a payment webhook
+            # may have confirmed it since it was read above.
+            reverted = session.query(Appointment).filter(
+                Appointment.id == appt.id,
+                Appointment.status == "pending_payment",
+            ).update(
+                {**cleared_slot_fields(), "status": "free", "payment_status": "failed"},
+                synchronize_session=False
+            )
+            if reverted != 1:
+                continue
+            released += 1
+
             # Remove from Google Calendar if event exists
-            if appt.google_event_id and calendar_service.is_available:
+            if event_id and calendar_service.is_available:
                 try:
-                    calendar_service.delete_booking_event(appt.google_event_id)
+                    calendar_service.delete_booking_event(event_id)
                 except Exception as e:
                     logger.error(f"Error removing calendar event during hold expiration: {e}")
-
-            # Revert slot to free
-            appt.status = "free"
-            appt.payment_status = "failed"
-            appt.patient_name = ""
-            appt.phone = ""
-            appt.payment_link_id = None
-            appt.payment_link_url = None
-            appt.hold_expires_at = None
-            appt.google_event_id = None
-            released += 1
 
             logger.info(f"Released expired provisional hold for slot {pretty_time} (phone: +{phone})")
 
@@ -148,7 +145,7 @@ def sync_and_clean_orphan_calendar_events() -> int:
     try:
         with db_session() as session:
             booked_appts = session.query(Appointment).filter(
-                Appointment.status == "booked",
+                Appointment.status.in_(["booked", "completed"]),
                 Appointment.google_event_id.isnot(None)
             ).all()
             valid_ids = {a.google_event_id for a in booked_appts if a.google_event_id}

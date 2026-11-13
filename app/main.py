@@ -33,8 +33,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("clinic_receptionist")
 
+def _log_production_config_problems():
+    """Loudly report settings that leave patient data or bookings exposed in production."""
+    if not settings.is_production:
+        logger.warning("APP_ENV is not 'production': unsigned webhooks and unauthenticated voice calls are accepted.")
+        return
+    problems = []
+    if not settings.META_APP_SECRET:
+        problems.append("META_APP_SECRET is missing: WhatsApp webhooks will be rejected")
+    if not settings.VERIFY_TOKEN:
+        problems.append("VERIFY_TOKEN is missing: Meta webhook verification will fail")
+    if settings.ENABLE_VOICE_AI and not settings.VOICE_API_SECRET:
+        problems.append("VOICE_API_SECRET is missing: voice API calls will be rejected")
+    if settings.ENABLE_RAZORPAY and not settings.RAZORPAY_WEBHOOK_SECRET:
+        problems.append("RAZORPAY_WEBHOOK_SECRET is missing: payment confirmations will be rejected")
+    if settings.DASHBOARD_PIN.strip() in ("", "1234") or len(settings.DASHBOARD_PIN.strip()) < 6:
+        problems.append("DASHBOARD_PIN is the default or shorter than 6 characters: dashboard login is disabled")
+    for p in problems:
+        logger.error(f"[config] {p}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _log_production_config_problems()
     # Startup: Initialize database schema with retry resilience
     logger.info("Initializing database tables...")
     try:
@@ -164,64 +184,95 @@ async def razorpay_webhook_handler(
     event = data.get("event")
     logger.info(f"Received Razorpay webhook event: {event}")
 
-    if event in ("payment_link.paid", "payment.captured"):
-        payload_data = data.get("payload", {})
-        plink_entity = payload_data.get("payment_link", {}).get("entity", {})
-        payment_entity = payload_data.get("payment", {}).get("entity", {})
+    # Only payment links are issued by this app, so payment_link.paid is the one event that
+    # confirms a booking. (payment.captured fires for the same payment and is ignored.)
+    if event != "payment_link.paid":
+        return {"status": "ignored"}
 
-        # Extract appointment ID or payment link ID
-        notes = plink_entity.get("notes") or payment_entity.get("notes") or {}
-        appt_id = notes.get("appointment_id")
-        plink_id = plink_entity.get("id")
-        payment_id = payment_entity.get("id") or "UPI_DIRECT"
-        amount_paid = (plink_entity.get("amount_paid") or payment_entity.get("amount") or 0) // 100
+    payload_data = data.get("payload", {})
+    plink_entity = payload_data.get("payment_link", {}).get("entity", {})
+    payment_entity = payload_data.get("payment", {}).get("entity", {})
 
-        with db_session() as session:
-            appt = None
-            if appt_id:
-                try:
-                    appt = session.query(Appointment).filter_by(id=int(appt_id)).first()
-                except (ValueError, TypeError):
-                    pass
-            if not appt and plink_id:
-                appt = session.query(Appointment).filter_by(payment_link_id=plink_id).first()
+    notes = plink_entity.get("notes") or {}
+    appt_id = notes.get("appointment_id")
+    plink_id = plink_entity.get("id")
+    payer_phone = "".join(c for c in str(notes.get("phone", "")) if c.isdigit())
+    payment_id = payment_entity.get("id") or "UPI_DIRECT"
+    amount_paid = (plink_entity.get("amount_paid") or payment_entity.get("amount") or 0) // 100
 
-            if not appt:
-                logger.warning(f"No appointment found matching Razorpay webhook (appt_id={appt_id}, plink_id={plink_id})")
-                return {"status": "ignored"}
+    if not plink_id:
+        logger.warning("Razorpay payment_link.paid webhook without a payment link id; ignoring.")
+        return {"status": "ignored"}
 
-            # Idempotency: if already confirmed and paid, don't duplicate calendar/messages
-            if appt.status == "booked" and appt.payment_status == "paid":
-                logger.info(f"Appointment {appt.id} already paid and booked. Skipping duplicate webhook.")
-                return {"status": "already_processed"}
+    with db_session() as session:
+        appt = session.query(Appointment).filter_by(payment_link_id=plink_id).first()
+        if not appt and appt_id:
+            try:
+                appt = session.query(Appointment).filter_by(id=int(appt_id)).first()
+            except (ValueError, TypeError):
+                appt = None
 
-            # Promote from pending_payment to booked
-            local_dt = _to_clinic_tz(appt.slot)
-            pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p")
-            slot_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        if not appt:
+            logger.warning(f"No appointment found matching Razorpay webhook (appt_id={appt_id}, plink_id={plink_id})")
+            return {"status": "ignored"}
 
-            appt.status = "booked"
-            appt.payment_status = "paid"
-            appt.hold_expires_at = None
+        # Idempotency: Razorpay retries webhooks; don't duplicate calendar events or messages
+        if appt.payment_link_id == plink_id and appt.status == "booked" and appt.payment_status == "paid":
+            logger.info(f"Appointment {appt.id} already paid and booked. Skipping duplicate webhook.")
+            return {"status": "already_processed"}
 
-            # Sync with Google Calendar
-            if calendar_service.is_available and not appt.google_event_id:
-                try:
-                    g_event_id = calendar_service.create_booking_event(appt.patient_name, appt.phone, slot_iso)
-                    appt.google_event_id = g_event_id
-                except Exception as e:
-                    logger.error(f"Failed to create Google Calendar event after payment: {e}")
+        local_dt = _to_clinic_tz(appt.slot)
+        pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p")
+        slot_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-            # Send immediate WhatsApp confirmation
-            if appt.phone:
-                conf_text = (
-                    f"✅ *Dr. Rao's Clinic - Advance Token Received*\n\n"
-                    f"Hello *{appt.patient_name}*, we received your UPI payment of *₹{amount_paid or settings.ADVANCE_TOKEN_AMOUNT_INR}* (Ref: {payment_id}).\n\n"
-                    f"📅 *Appointment*: {pretty_slot}\n"
-                    f"📍 *Clinic Address*: Dr. Rao's Clinic, Road No. 36, Jubilee Hills, Hyderabad\n"
-                    f"🗺️ *Google Maps*: https://maps.google.com/?q=Dr+Raos+Clinic+Hyderabad\n\n"
-                    f"Your slot is confirmed. If you need to reschedule or cancel, reply to this message!"
+        # Promote only if this payment link still holds the slot. The conditional update
+        # also loses cleanly to the hold-expiry job if both run at the same moment.
+        promoted = session.query(Appointment).filter(
+            Appointment.id == appt.id,
+            Appointment.status == "pending_payment",
+            Appointment.payment_link_id == plink_id,
+        ).update(
+            {"status": "booked", "payment_status": "paid", "hold_expires_at": None},
+            synchronize_session=False
+        )
+
+        if promoted != 1:
+            # The hold expired (or was cancelled) and the slot may now belong to someone else.
+            # Never touch that slot: the payer needs a refund instead.
+            logger.error(
+                f"[REFUND REQUIRED] Late Razorpay payment {payment_id} of Rs {amount_paid} for link {plink_id}: "
+                f"appointment {appt.id} ({pretty_slot}) is no longer held by this payment (status={appt.status})."
+            )
+            if payer_phone:
+                late_text = (
+                    f"⚠️ *Dr. Rao's Clinic - Payment Received After Reservation Expired*\n\n"
+                    f"We received your payment of *₹{amount_paid}* (Ref: {payment_id}), but your reservation for "
+                    f"*{pretty_slot}* had already expired.\n\n"
+                    f"Your payment will be refunded. Reply to this message if you'd like to book a new slot."
                 )
-                background_tasks.add_task(send_message, appt.phone, conf_text)
+                background_tasks.add_task(send_message, payer_phone, late_text)
+            return {"status": "late_payment_refund_required", "appointment_id": appt.id}
+
+        session.expire_all()
+        appt = session.query(Appointment).filter_by(id=appt.id).first()
+
+        # Sync with Google Calendar
+        if calendar_service.is_available and not appt.google_event_id:
+            try:
+                appt.google_event_id = calendar_service.create_booking_event(appt.patient_name, appt.phone, slot_iso)
+            except Exception as e:
+                logger.error(f"Failed to create Google Calendar event after payment: {e}")
+
+        # Send immediate WhatsApp confirmation
+        if appt.phone:
+            conf_text = (
+                f"✅ *Dr. Rao's Clinic - Advance Token Received*\n\n"
+                f"Hello *{appt.patient_name}*, we received your UPI payment of *₹{amount_paid or settings.ADVANCE_TOKEN_AMOUNT_INR}* (Ref: {payment_id}).\n\n"
+                f"📅 *Appointment*: {pretty_slot}\n"
+                f"📍 *Clinic Address*: {settings.CLINIC_ADDRESS}\n"
+                f"🗺️ *Google Maps*: {settings.CLINIC_MAPS_URL}\n\n"
+                f"Your slot is confirmed. If you need to reschedule or cancel, reply to this message!"
+            )
+            background_tasks.add_task(send_message, appt.phone, conf_text)
 
     return {"status": "ok"}

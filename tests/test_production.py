@@ -272,7 +272,9 @@ def test_dashboard_views_and_apis(monkeypatch):
 
     res_login = client.post("/api/dashboard/login", json={"pin": settings.DASHBOARD_PIN})
     assert res_login.status_code == 200
-    assert "dashboard_pin" in res_login.headers.get("set-cookie", "")
+    set_cookie = res_login.headers.get("set-cookie", "")
+    assert "dashboard_session" in set_cookie
+    assert "httponly" in set_cookie.lower()
     headers = {"X-Dashboard-PIN": settings.DASHBOARD_PIN}
 
     # 4. Appointments API with cookie auth

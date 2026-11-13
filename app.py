@@ -12,7 +12,7 @@ from app.tools import seed_slots_if_needed
 def chat():
     """Terminal chat demo for testing conversation, language fluency, and tool calling."""
     seed_slots_if_needed()
-    phone = "+919030940864"
+    phone = "+910000000000"  # Demo number; replies go to the terminal, not WhatsApp
     print("=" * 60)
     print("Dr. Rao's Clinic - WhatsApp AI Receptionist (Terminal Demo)")
     print("Languages: English / Telugu / Hindi / Tenglish / Hinglish")

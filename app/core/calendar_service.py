@@ -53,12 +53,13 @@ class GoogleCalendarService:
     def is_available(self) -> bool:
         return self._service is not None
 
-    def get_free_slots(self, days_ahead: int = 3) -> List[Tuple[str, str]]:
+    def get_free_slots(self, days_ahead: int = 3) -> Optional[List[Tuple[str, str]]]:
         """Query Google Calendar free/busy to find unoccupied clinic slots.
-        Returns list of (iso_slot, display_str).
+        Returns list of (iso_slot, display_str), or None if the calendar could not be read
+        (so callers can tell "everything is busy" apart from "the query failed").
         """
         if not self.is_available:
-            return []
+            return None
 
         now = datetime.now(self._tz)
         start_time = now.isoformat()
@@ -111,7 +112,7 @@ class GoogleCalendarService:
             return free_slots
         except Exception as e:
             logger.error(f"Error querying Google Calendar free/busy: {e}")
-            return []
+            return None
 
     def create_booking_event(self, name: str, phone: str, slot_iso: str, duration_minutes: int = 45) -> Optional[str]:
         """Create an event on Dr. Rao's Google Calendar. Returns event_id if successful."""

@@ -1,4 +1,5 @@
 """Voice AI Receptionist API endpoints for Bolna.dev / Vobiz telephony integrations."""
+import hmac
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -8,7 +9,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, BackgroundTasks
 from app.core.config import settings
 from app.core.database import db_session
 from app.core.models import Appointment
-from app.core.tools import get_free_slots, cancel_booking, _to_clinic_tz, _get_tz, seed_slots_if_needed
+from app.core.tools import (
+    get_free_slots, cancel_booking, _to_clinic_tz, _get_tz, seed_slots_if_needed,
+    available_slot_rows, match_requested_slot, claim_slot,
+)
 from app.core.calendar_service import calendar_service
 from app.core.razorpay_service import razorpay_service
 from app.core.jev_service import jev_service
@@ -33,9 +37,19 @@ class VoiceTriageRequest(BaseModel):
     phone: Optional[str] = Field(None, description="Caller's phone number if available")
 
 def _verify_voice_secret(x_voice_secret: Optional[str]):
-    """Optional security verification for Bolna webhook calls."""
-    if settings.VOICE_API_SECRET and x_voice_secret != settings.VOICE_API_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized voice API request")
+    """Authenticate Bolna/Vobiz calls with the shared X-Voice-Secret header.
+
+    Without a configured secret these endpoints can book and cancel any patient's
+    appointment, so they are only left open outside production.
+    """
+    if not settings.ENABLE_VOICE_AI:
+        raise HTTPException(status_code=404, detail="Voice AI channel is disabled")
+    if settings.VOICE_API_SECRET:
+        if not x_voice_secret or not hmac.compare_digest(x_voice_secret, settings.VOICE_API_SECRET):
+            raise HTTPException(status_code=401, detail="Unauthorized voice API request")
+    elif settings.is_production:
+        logger.error("VOICE_API_SECRET is not configured; rejecting voice API request in production.")
+        raise HTTPException(status_code=401, detail="Voice API secret is not configured")
 
 def _notify_whatsapp_booking_confirmed(phone: str, patient_name: str, slot_display: str):
     """Deliver immediate WhatsApp booking confirmation card."""
@@ -43,8 +57,8 @@ def _notify_whatsapp_booking_confirmed(phone: str, patient_name: str, slot_displ
         f"✅ *Dr. Rao's Clinic - Appointment Confirmed*\n\n"
         f"Hello *{patient_name}*, your appointment with Dr. Rao is confirmed!\n\n"
         f"📅 *Date & Time*: {slot_display}\n"
-        f"📍 *Clinic Address*: Dr. Rao's Clinic, Road No. 36, Jubilee Hills, Hyderabad\n"
-        f"🗺️ *Google Maps*: https://maps.google.com/?q=Dr+Raos+Clinic+Hyderabad\n\n"
+        f"📍 *Clinic Address*: {settings.CLINIC_ADDRESS}\n"
+        f"🗺️ *Google Maps*: {settings.CLINIC_MAPS_URL}\n\n"
         f"If you need to reschedule or cancel at any time, just reply to this message!"
     )
     send_message(phone, text)
@@ -142,82 +156,40 @@ def book_voice_slot(
     Reserves slot, generates Razorpay UPI payment link (if enabled), and sends WhatsApp confirmation.
     """
     _verify_voice_secret(x_voice_secret)
-    clean_phone = payload.phone.lstrip("+").strip()
-    name = payload.patient_name.strip() or "Patient"
-    want = payload.slot.replace(",", "").replace("  ", " ").lower().strip()
+    clean_phone = "".join(c for c in payload.phone if c.isdigit())
+    name = " ".join(payload.patient_name.split())[:100] or "Patient"
     tz = _get_tz()
     now = datetime.now(tz)
+
+    if len(clean_phone) < 10:
+        return {
+            "status": "invalid_phone",
+            "spoken_text": "I didn't catch your complete phone number. Could you please say your full 10-digit mobile number?"
+        }
 
     seed_slots_if_needed()
 
     with db_session() as session:
-        # Query available upcoming slots
-        rows = session.query(Appointment).filter(
-            Appointment.status.in_(["free", "cancelled"]),
-            Appointment.slot > now
-        ).all()
-
-        matched_slot = None
-        for appt in rows:
-            local_d = _to_clinic_tz(appt.slot)
-            iso_str = local_d.strftime("%Y-%m-%dT%H:%M:%S").lower()
-            pretty = local_d.strftime("%a %d %b %I:%M %p").lower()
-            pretty_no_zero = local_d.strftime("%a %d %b %I:%M %p").replace(" 0", " ").lower()
-            time_no_zero = local_d.strftime("%I:%M %p").lstrip("0").lower()
-            time_short = time_no_zero.replace(":00", "").strip()
-            weekday = local_d.strftime("%A").lower()
-            month_name = local_d.strftime("%B").lower()
-            day_num = local_d.strftime("%d").lstrip("0")
-            human_label = f"{weekday} {day_num} {month_name} at {time_no_zero}".lower()
-            today_label = f"today at {time_short}" if local_d.date() == now.date() else ""
-            tomorrow_label = f"tomorrow at {time_short}" if local_d.date() == (now + timedelta(days=1)).date() else ""
-
-            candidates = [iso_str, pretty, pretty_no_zero, time_no_zero, time_short, weekday, human_label]
-            if today_label:
-                candidates.extend([today_label, "today"])
-            if tomorrow_label:
-                candidates.extend([tomorrow_label, "tomorrow"])
-
-            # Direct or substring match
-            if any(want in c or c in want for c in candidates if c):
-                matched_slot = appt
-                break
-
-        if not matched_slot:
-            # Fallback: match partial hour numbers e.g. "6", "11", "5", "morning", "evening"
-            for appt in rows:
-                local_d = _to_clinic_tz(appt.slot)
-                hour_12 = local_d.strftime("%I").lstrip("0")
-                if hour_12 and (f" {hour_12} " in f" {want} " or f"{hour_12}pm" in want.replace(" ", "") or f"{hour_12}am" in want.replace(" ", "")):
-                    matched_slot = appt
-                    break
-
-        # Fallback: if slot is available on Google Calendar but not in DB appointments
-        if not matched_slot and calendar_service.is_available:
-            try:
-                cal_slots = calendar_service.get_free_slots(days_ahead=3)
-                for iso, display in cal_slots:
-                    dt = _to_clinic_tz(datetime.fromisoformat(iso))
-                    w_day = dt.strftime("%A").lower()
-                    w_time = dt.strftime("%I:%M %p").lstrip("0").lower()
-                    cands = [iso.lower(), display.lower(), w_day, w_time, w_time.replace(":00", "")]
-                    if any(want in c or c in want for c in cands):
-                        matched_slot = Appointment(patient_name="", phone="", slot=dt, status="free")
-                        session.add(matched_slot)
-                        session.flush()
-                        break
-            except Exception as e:
-                logger.warning(f"Google Calendar fallback match error: {e}")
+        rows = available_slot_rows(session, now)
+        matched_slot = match_requested_slot(payload.slot, rows, now)
 
         if not matched_slot:
             return {
                 "status": "slot_unavailable",
-                "spoken_text": f"I'm sorry, the {payload.slot} slot is no longer available. Would you like me to check other available times for you?"
+                "spoken_text": (
+                    f"I'm sorry, I couldn't find an open slot for {payload.slot}. "
+                    "Could you tell me the day and time you'd like, or shall I read out the available times?"
+                )
             }
 
+        appt_id = matched_slot.id
         local_dt = _to_clinic_tz(matched_slot.slot)
         pretty_slot = local_dt.strftime("%a %d %b at %I:%M %p").replace(" 0", " ")
         slot_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        taken_reply = {
+            "status": "slot_unavailable",
+            "spoken_text": f"I'm sorry, {pretty_slot} was just booked by another caller. Would you like me to check other available times?"
+        }
 
         # -------------------------------------------------------------
         # Mode A: Razorpay Advance Token Payment Enabled
@@ -225,33 +197,36 @@ def book_voice_slot(
         if settings.ENABLE_RAZORPAY:
             hold_minutes = settings.SLOT_HOLD_MINUTES
             amount = settings.ADVANCE_TOKEN_AMOUNT_INR
-            hold_expires = now + timedelta(minutes=hold_minutes)
 
             # Hold the slot provisionally
-            matched_slot.patient_name = name
-            matched_slot.phone = clean_phone
-            matched_slot.status = "pending_payment"
-            matched_slot.payment_status = "pending"
-            matched_slot.payment_amount = amount
-            matched_slot.hold_expires_at = hold_expires
-            matched_slot.notes = payload.notes
-            session.flush()
+            if not claim_slot(
+                session, appt_id,
+                patient_name=name,
+                phone=clean_phone,
+                status="pending_payment",
+                payment_status="pending",
+                payment_amount=amount,
+                hold_expires_at=now + timedelta(minutes=hold_minutes),
+                notes=payload.notes,
+            ):
+                return taken_reply
 
             # Generate Razorpay UPI Link
             link_info = razorpay_service.create_payment_link(
-                appointment_id=matched_slot.id,
+                appointment_id=appt_id,
                 patient_name=name,
                 phone=clean_phone,
                 amount_inr=amount,
                 slot_display=pretty_slot,
                 hold_minutes=hold_minutes
             )
-
-            matched_slot.payment_link_id = link_info.get("id")
-            matched_slot.payment_link_url = link_info.get("short_url")
+            pay_url = link_info.get("short_url")
+            session.query(Appointment).filter(Appointment.id == appt_id).update(
+                {"payment_link_id": link_info.get("id"), "payment_link_url": pay_url},
+                synchronize_session=False
+            )
 
             # Dispatch WhatsApp payment link in background
-            pay_url = link_info.get("short_url")
             background_tasks.add_task(
                 _notify_whatsapp_provisional_hold,
                 clean_phone,
@@ -271,7 +246,7 @@ def book_voice_slot(
 
             return {
                 "status": "pending_payment",
-                "appointment_id": matched_slot.id,
+                "appointment_id": appt_id,
                 "slot": pretty_slot,
                 "payment_url": pay_url,
                 "amount": amount,
@@ -281,39 +256,43 @@ def book_voice_slot(
         # -------------------------------------------------------------
         # Mode B: Instant Confirmation (Free / Cash on Arrival)
         # -------------------------------------------------------------
-        else:
-            g_event_id = None
-            if calendar_service.is_available:
-                g_event_id = calendar_service.create_booking_event(name, clean_phone, slot_iso)
+        if not claim_slot(
+            session, appt_id,
+            patient_name=name,
+            phone=clean_phone,
+            status="booked",
+            notes=payload.notes,
+        ):
+            return taken_reply
 
-            matched_slot.patient_name = name
-            matched_slot.phone = clean_phone
-            matched_slot.status = "booked"
-            matched_slot.payment_status = "none"
-            matched_slot.google_event_id = g_event_id
-            matched_slot.notes = payload.notes
+        g_event_id = None
+        if calendar_service.is_available:
+            g_event_id = calendar_service.create_booking_event(name, clean_phone, slot_iso)
+            if g_event_id:
+                session.query(Appointment).filter(Appointment.id == appt_id).update(
+                    {"google_event_id": g_event_id}, synchronize_session=False)
 
-            # Dispatch WhatsApp confirmation in background
-            background_tasks.add_task(
-                _notify_whatsapp_booking_confirmed,
-                clean_phone,
-                name,
-                pretty_slot
-            )
+        # Dispatch WhatsApp confirmation in background
+        background_tasks.add_task(
+            _notify_whatsapp_booking_confirmed,
+            clean_phone,
+            name,
+            pretty_slot
+        )
 
-            spoken_text = (
-                f"Your appointment with Dr. Rao is confirmed for {pretty_slot}! "
-                f"I have sent the booking details and clinic location directly to your WhatsApp. "
-                f"Thank you for calling Dr. Rao's Clinic!"
-            )
+        spoken_text = (
+            f"Your appointment with Dr. Rao is confirmed for {pretty_slot}! "
+            f"I have sent the booking details and clinic location directly to your WhatsApp. "
+            f"Thank you for calling Dr. Rao's Clinic!"
+        )
 
-            return {
-                "status": "confirmed",
-                "appointment_id": matched_slot.id,
-                "slot": pretty_slot,
-                "google_event_id": g_event_id,
-                "spoken_text": spoken_text
-            }
+        return {
+            "status": "confirmed",
+            "appointment_id": appt_id,
+            "slot": pretty_slot,
+            "google_event_id": g_event_id,
+            "spoken_text": spoken_text
+        }
 
 @router.post("/cancel")
 def cancel_voice_booking(

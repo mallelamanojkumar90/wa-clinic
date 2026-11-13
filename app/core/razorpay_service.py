@@ -107,6 +107,9 @@ class RazorpayService:
         Uses HMAC-SHA256 signature verification.
         """
         if not self.webhook_secret:
+            if settings.is_production:
+                logger.error("RAZORPAY_WEBHOOK_SECRET is not configured; rejecting unsigned payment webhook in production.")
+                return False
             logger.warning("RAZORPAY_WEBHOOK_SECRET is not configured. Allowing webhook in dev/test mode.")
             return True
 

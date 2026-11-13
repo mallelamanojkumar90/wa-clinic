@@ -23,9 +23,25 @@ Language Instructions:
 Appointment Booking Rules:
 - ALWAYS call the tool `get_free_slots` before stating slot availability to the patient. Never invent or hallucinate slots.
 - To book an appointment, ask for the patient's full name and their preferred slot.
-- Once the patient selects a slot, call `book_slot` with the verbatim slot string from `get_free_slots`, patient name, and phone number.
-- To cancel an existing booking, call `cancel_booking` using their phone number.
+- Once the patient selects a slot, call `book_slot` with the verbatim slot string from `get_free_slots` and the patient's name.
+- To cancel, call `cancel_booking`. It cancels the next appointment booked from this WhatsApp number only.
+- You can only book or cancel for the WhatsApp number you are chatting with. If someone asks to cancel or change
+  another person's appointment, ask that person to message the clinic from their own number or call the clinic.
 """
+
+def _run_tool(fn_name: str, args: Dict[str, Any], phone: str) -> str:
+    """Execute one tool call. The phone number always comes from the WhatsApp sender, never the model."""
+    try:
+        if fn_name == "get_free_slots":
+            return str(get_free_slots())
+        if fn_name == "book_slot":
+            return book_slot(slot=str(args.get("slot", "")), name=str(args.get("name", "")), phone=phone)
+        if fn_name == "cancel_booking":
+            return cancel_booking(phone)
+        return f"Unknown tool {fn_name}"
+    except Exception as e:
+        logger.error(f"Tool {fn_name} failed: {e}")
+        return f"Tool {fn_name} failed due to a system error. Apologise and ask the patient to try again."
 
 def _client() -> OpenAI:
     return OpenAI(
@@ -76,7 +92,8 @@ def reply(user_text: str, phone: str, triage: Optional[Any] = None) -> str:
     }
     messages = [system_msg] + history[-10:]
 
-    target_model = settings.MODEL.split("/", 1)[1] if "/" in settings.MODEL else settings.MODEL
+    # OpenRouter model ids include the provider prefix (e.g. "openai/gpt-4o-mini").
+    target_model = settings.MODEL
     client = _client()
 
     for round_idx in range(4):  # Max 4 tool iterations
@@ -109,17 +126,9 @@ def reply(user_text: str, phone: str, triage: Optional[Any] = None) -> str:
 
             logger.info(f"[tool_call] {fn_name}({args})")
 
-            tool_result = ""
-            if fn_name == "get_free_slots":
-                slots = get_free_slots()
-                tool_result = str(slots)
-            elif fn_name == "book_slot":
-                tool_result = book_slot(**args)
-            elif fn_name == "cancel_booking":
-                target_phone = args.get("phone", clean_phone)
-                tool_result = cancel_booking(target_phone)
-            else:
-                tool_result = f"Unknown tool {fn_name}"
+            if not isinstance(args, dict):
+                args = {}
+            tool_result = _run_tool(fn_name, args, clean_phone)
 
             messages.append({
                 "role": "tool",

@@ -3,7 +3,12 @@
 Provides real-time patient queue management, status updating, walk-in bookings,
 slot blocking, and emergency WhatsApp delay broadcasting.
 """
+import hashlib
+import hmac
 import logging
+import secrets
+import threading
+import time
 from datetime import datetime, date, timedelta
 from typing import Optional, List
 import pytz
@@ -15,7 +20,7 @@ from app.core.database import db_session
 from app.core.models import Appointment
 from app.core.calendar_service import calendar_service
 from app.channels.whatsapp.client import send_message
-from app.core.tools import seed_slots_if_needed, _to_clinic_tz
+from app.core.tools import seed_slots_if_needed, _to_clinic_tz, claim_slot, cleared_slot_fields
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +29,116 @@ router = APIRouter(tags=["dashboard"])
 def _get_tz():
     return pytz.timezone(settings.CLINIC_TIMEZONE)
 
+# -----------------------------------------------------------------------------
+# Authentication
+# -----------------------------------------------------------------------------
+# Logging in sets a signed, HTTP-only session cookie; the PIN itself is never stored
+# in the browser. Scripts may still send the PIN in the X-Dashboard-PIN header.
+# Wrong PINs (by login or header) are rate limited per client address.
+
+SESSION_COOKIE = "dashboard_session"
+SESSION_TTL_SECONDS = 7 * 24 * 3600
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_SECONDS = 15 * 60
+
+_SESSION_KEY = (settings.SESSION_SECRET or secrets.token_hex(32)).encode("utf-8")
+_failed_attempts: dict = {}
+_failed_lock = threading.Lock()
+
+def _pin_fingerprint() -> str:
+    # Part of every session token, so changing DASHBOARD_PIN signs everyone out.
+    return hashlib.sha256(settings.DASHBOARD_PIN.strip().encode("utf-8")).hexdigest()[:16]
+
+def _sign(payload: str) -> str:
+    return hmac.new(_SESSION_KEY, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _make_session_token() -> str:
+    payload = f"{int(time.time()) + SESSION_TTL_SECONDS}.{_pin_fingerprint()}"
+    return f"{payload}.{_sign(payload)}"
+
+def _is_valid_session_token(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    try:
+        expires_s, fingerprint, signature = token.split(".")
+        expires = int(expires_s)
+    except ValueError:
+        return False
+    if not hmac.compare_digest(signature, _sign(f"{expires_s}.{fingerprint}")):
+        return False
+    return fingerprint == _pin_fingerprint() and expires > time.time()
+
+def dashboard_enabled() -> bool:
+    """In production the dashboard stays locked until a non-default PIN of 6+ characters is set."""
+    pin = settings.DASHBOARD_PIN.strip()
+    if not pin:
+        return False
+    if settings.is_production and (pin == "1234" or len(pin) < 6):
+        return False
+    return True
+
+def _client_key(request: Request) -> str:
+    # Behind Render's proxy the real client is the last X-Forwarded-For entry
+    # (earlier entries are supplied by the client and can be forged).
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[-1].strip()
+    return request.client.host if request.client else "unknown"
+
+def _is_locked_out(key: str) -> bool:
+    cutoff = time.time() - LOCKOUT_SECONDS
+    with _failed_lock:
+        recent = [t for t in _failed_attempts.get(key, []) if t > cutoff]
+        if recent:
+            _failed_attempts[key] = recent
+        else:
+            _failed_attempts.pop(key, None)
+        return len(recent) >= MAX_FAILED_ATTEMPTS
+
+def _record_failure(key: str):
+    with _failed_lock:
+        _failed_attempts.setdefault(key, []).append(time.time())
+    logger.warning(f"Failed dashboard PIN attempt from {key}")
+
+def _clear_failures(key: str):
+    with _failed_lock:
+        _failed_attempts.pop(key, None)
+
+def _pin_matches(pin: Optional[str]) -> bool:
+    if not pin:
+        return False
+    return hmac.compare_digest(pin.strip().encode("utf-8"), settings.DASHBOARD_PIN.strip().encode("utf-8"))
+
 def is_authenticated(request: Request) -> bool:
-    """Verify request has valid dashboard authentication PIN."""
-    # Check header, cookie, or query param
-    pin = (
-        request.headers.get("X-Dashboard-PIN")
-        or request.cookies.get("dashboard_pin")
-        or request.query_params.get("pin")
-    )
-    return pin == settings.DASHBOARD_PIN
+    """True for a valid session cookie, or a correct X-Dashboard-PIN header."""
+    if not dashboard_enabled():
+        return False
+    if _is_valid_session_token(request.cookies.get(SESSION_COOKIE)):
+        return True
+    header_pin = request.headers.get("X-Dashboard-PIN")
+    if header_pin:
+        key = _client_key(request)
+        if _is_locked_out(key):
+            return False
+        if _pin_matches(header_pin):
+            _clear_failures(key)
+            return True
+        _record_failure(key)
+    return False
 
 def require_auth(request: Request):
     """FastAPI dependency to protect dashboard API endpoints."""
+    if not dashboard_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Dashboard is disabled until a strong DASHBOARD_PIN is configured"
+        )
     if not is_authenticated(request):
+        if _is_locked_out(_client_key(request)):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many wrong PINs. Try again later.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing dashboard PIN"
+            detail="Invalid or missing dashboard session"
         )
 
 # Pydantic Schemas
@@ -65,19 +164,34 @@ class BroadcastRequest(BaseModel):
 # -----------------------------------------------------------------------------
 
 @router.post("/api/dashboard/login")
-def dashboard_login(payload: LoginRequest, response: Response):
-    """Authenticate dashboard using configured DASHBOARD_PIN."""
-    if payload.pin.strip() == settings.DASHBOARD_PIN.strip():
-        # Set persistent cookie valid for 7 days
-        response.set_cookie(
-            key="dashboard_pin",
-            value=settings.DASHBOARD_PIN,
-            max_age=604800,
-            httponly=False,
-            samesite="lax"
-        )
-        return {"ok": True, "message": "Authenticated"}
-    raise HTTPException(status_code=401, detail="Incorrect PIN")
+def dashboard_login(payload: LoginRequest, request: Request, response: Response):
+    """Exchange the DASHBOARD_PIN for a signed 7-day session cookie."""
+    if not dashboard_enabled():
+        raise HTTPException(status_code=503, detail="Dashboard is disabled until a strong DASHBOARD_PIN is configured")
+    key = _client_key(request)
+    if _is_locked_out(key):
+        raise HTTPException(status_code=429, detail="Too many wrong PINs. Try again in 15 minutes.")
+    if not _pin_matches(payload.pin):
+        _record_failure(key)
+        raise HTTPException(status_code=401, detail="Incorrect PIN")
+
+    _clear_failures(key)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=_make_session_token(),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="strict",
+        path="/",
+    )
+    return {"ok": True, "message": "Authenticated"}
+
+@router.post("/api/dashboard/logout")
+def dashboard_logout(response: Response):
+    """Clear the dashboard session cookie."""
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
 
 @router.get("/api/dashboard/appointments")
 def get_daily_appointments(
@@ -165,8 +279,9 @@ def update_appointment_status(
             appt.google_event_id = None
 
         if new_status == "free":
-            appt.patient_name = ""
-            appt.phone = ""
+            # Reopening a slot clears the previous patient's details, reminder flags and payment link.
+            for field, value in cleared_slot_fields().items():
+                setattr(appt, field, value)
         elif new_status == "cancelled":
             appt.notes = f"{appt.notes or ''} [Cancelled via Front-Desk]".strip()
 
@@ -182,36 +297,42 @@ def walkin_booking(
     _: None = Depends(require_auth)
 ):
     """Manual walk-in or reception phone booking."""
+    patient_name = " ".join(payload.patient_name.split())[:100]
+    clean_phone = "".join(c for c in payload.phone if c.isdigit())
+    if not patient_name:
+        raise HTTPException(status_code=400, detail="Patient name is required")
+
     with db_session() as session:
         appt = session.query(Appointment).filter_by(id=payload.appointment_id).first()
         if not appt:
             raise HTTPException(status_code=404, detail="Appointment slot not found")
 
-        clean_phone = payload.phone.lstrip("+")
         local_dt = _to_clinic_tz(appt.slot)
         iso_str = local_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
+        # Never overwrite another patient's booking or payment hold.
+        if not claim_slot(
+            session, appt.id,
+            allowed_statuses=("free", "cancelled", "blocked"),
+            patient_name=patient_name,
+            phone=clean_phone,
+            notes=payload.notes.strip() if payload.notes else "Walk-in booking",
+            status="booked",
+        ):
+            raise HTTPException(status_code=409, detail="This slot is already booked or on hold for another patient")
+
         # Sync with Google Calendar if enabled
-        g_event_id = None
         if calendar_service.is_available:
             try:
-                g_event_id = calendar_service.create_booking_event(
-                    payload.patient_name,
-                    clean_phone,
-                    iso_str
-                )
+                g_event_id = calendar_service.create_booking_event(patient_name, clean_phone, iso_str)
+                if g_event_id:
+                    session.query(Appointment).filter(Appointment.id == appt.id).update(
+                        {"google_event_id": g_event_id}, synchronize_session=False)
             except Exception as e:
                 logger.error(f"Failed to sync walk-in booking to Google Calendar: {e}")
 
-        appt.patient_name = payload.patient_name.strip()
-        appt.phone = clean_phone
-        appt.notes = payload.notes.strip() if payload.notes else "Walk-in booking"
-        appt.status = "booked"
-        appt.google_event_id = g_event_id
-        session.commit()
-
-        logger.info(f"Dashboard created walk-in booking for {appt.patient_name} at {iso_str}")
-        return {"ok": True, "message": f"Booked {appt.patient_name}"}
+        logger.info(f"Dashboard created walk-in booking for {patient_name} at {iso_str}")
+        return {"ok": True, "message": f"Booked {patient_name}"}
 
 @router.post("/api/dashboard/broadcast")
 def broadcast_delay_alert(
@@ -260,7 +381,7 @@ def broadcast_delay_alert(
 @router.post("/api/dashboard/calendar/sync")
 def sync_calendar(_: None = Depends(require_auth)):
     """Sync Google Calendar and purge any orphaned events not active in DB."""
-    from app.scheduler import sync_and_clean_orphan_calendar_events
+    from app.core.scheduler import sync_and_clean_orphan_calendar_events
     purged = sync_and_clean_orphan_calendar_events()
     return {"ok": True, "purged_count": purged}
 
@@ -435,7 +556,7 @@ def render_dashboard(request: Request):
             </div>
             <form onsubmit="handleLogin(event)" class="space-y-4">
                 <div>
-                    <input type="password" id="login-pin" maxlength="10" placeholder="Enter PIN (Default: 1234)" class="w-full text-center tracking-widest text-lg px-4 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-clinic-500/20 focus:border-clinic-500">
+                    <input type="password" id="login-pin" maxlength="10" placeholder="Enter PIN" class="w-full text-center tracking-widest text-lg px-4 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-clinic-500/20 focus:border-clinic-500">
                     <p id="login-error" class="text-xs text-rose-600 font-semibold mt-1 hidden"></p>
                 </div>
                 <button type="submit" class="w-full py-2.5 rounded-xl bg-clinic-600 hover:bg-clinic-700 text-white font-semibold text-sm shadow-md shadow-clinic-500/20 transition">
@@ -521,20 +642,25 @@ def render_dashboard(request: Request):
 
     <!-- JavaScript Logic -->
     <script>
-        function getCookie(name) {
-            const value = `; ${document.cookie}`;
-            const parts = value.split(`; ${name}=`);
-            if (parts.length === 2) return parts.pop().split(';').shift();
-            return null;
+        // Session lives in an HTTP-only cookie; the browser sends it automatically.
+        // Clear the PIN that older versions of this page saved in the browser.
+        try { localStorage.removeItem('dashboard_pin'); } catch (e) {}
+        document.cookie = 'dashboard_pin=; Max-Age=0; path=/;';
+
+        // Patient names and notes come from WhatsApp/voice callers: never insert them as HTML.
+        function esc(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[ch]);
         }
 
-        function checkAuth() {
-            const pin = getCookie('dashboard_pin') || localStorage.getItem('dashboard_pin');
-            if (!pin) {
-                document.getElementById('login-modal').classList.remove('hidden');
-                return false;
+        function showLogin(message) {
+            const errEl = document.getElementById('login-error');
+            if (message) {
+                errEl.innerText = message;
+                errEl.classList.remove('hidden');
             }
-            return true;
+            document.getElementById('login-modal').classList.remove('hidden');
         }
 
         async function handleLogin(e) {
@@ -550,9 +676,15 @@ def render_dashboard(request: Request):
                     body: JSON.stringify({ pin: pin })
                 });
                 if (res.ok) {
-                    localStorage.setItem('dashboard_pin', pin);
+                    document.getElementById('login-pin').value = '';
                     document.getElementById('login-modal').classList.add('hidden');
                     loadAppointments();
+                } else if (res.status === 429) {
+                    errEl.innerText = 'Too many wrong PINs. Please wait 15 minutes.';
+                    errEl.classList.remove('hidden');
+                } else if (res.status === 503) {
+                    errEl.innerText = 'Dashboard is disabled until a strong PIN is configured on the server.';
+                    errEl.classList.remove('hidden');
                 } else {
                     errEl.innerText = 'Invalid PIN. Please try again.';
                     errEl.classList.remove('hidden');
@@ -563,10 +695,9 @@ def render_dashboard(request: Request):
             }
         }
 
-        function logout() {
-            document.cookie = 'dashboard_pin=; Max-Age=0; path=/;';
-            localStorage.removeItem('dashboard_pin');
-            document.getElementById('login-modal').classList.remove('hidden');
+        async function logout() {
+            try { await fetch('/api/dashboard/logout', { method: 'POST' }); } catch (e) {}
+            showLogin();
         }
 
         function setDateToday() {
@@ -583,21 +714,16 @@ def render_dashboard(request: Request):
         }
 
         async function loadAppointments() {
-            if (!checkAuth()) return;
-
             const dateVal = document.getElementById('date-picker').value;
             const indicator = document.getElementById('loading-indicator');
             const tbody = document.getElementById('appointments-body');
             indicator.classList.remove('hidden');
 
             try {
-                const pin = getCookie('dashboard_pin') || localStorage.getItem('dashboard_pin');
-                const res = await fetch(`/api/dashboard/appointments?target_date=${dateVal}`, {
-                    headers: { 'X-Dashboard-PIN': pin }
-                });
+                const res = await fetch(`/api/dashboard/appointments?target_date=${encodeURIComponent(dateVal)}`);
 
-                if (res.status === 401) {
-                    logout();
+                if (res.status === 401 || res.status === 429 || res.status === 503) {
+                    showLogin(res.status === 503 ? 'Dashboard is disabled until a strong PIN is configured on the server.' : null);
                     return;
                 }
 
@@ -640,7 +766,7 @@ def render_dashboard(request: Request):
                     }
 
                     // WhatsApp link
-                    const cleanPhone = appt.phone.replace(/\\D/g, '');
+                    const cleanPhone = String(appt.phone || '').replace(/\\D/g, '');
                     const waLink = cleanPhone ? `https://wa.me/${cleanPhone}` : '#';
 
                     // Actions
@@ -661,7 +787,7 @@ def render_dashboard(request: Request):
                     } else if (appt.status === 'free') {
                         actionsHtml = `
                             <div class="flex items-center justify-end gap-1.5">
-                                <button onclick="openWalkinModal(${appt.id}, '${appt.time}')" title="Book Walk-in" class="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition">
+                                <button onclick="openWalkinModal(${Number(appt.id)}, '${esc(appt.time)}')" title="Book Walk-in" class="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition">
                                     <i class="fa-solid fa-plus"></i> Book
                                 </button>
                                 <button onclick="updateStatus(${appt.id}, 'blocked')" title="Block Slot" class="px-2.5 py-1 text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg transition">
@@ -682,12 +808,12 @@ def render_dashboard(request: Request):
                     }
 
                     tr.innerHTML = `
-                        <td class="px-6 py-4 font-bold text-slate-900 whitespace-nowrap">${appt.time}</td>
-                        <td class="px-6 py-4 font-semibold text-slate-900">${appt.patient_name || '<span class="text-slate-300 italic">None</span>'}</td>
+                        <td class="px-6 py-4 font-bold text-slate-900 whitespace-nowrap">${esc(appt.time)}</td>
+                        <td class="px-6 py-4 font-semibold text-slate-900">${appt.patient_name ? esc(appt.patient_name) : '<span class="text-slate-300 italic">None</span>'}</td>
                         <td class="px-6 py-4">
                             ${appt.phone ? `
                                 <a href="${waLink}" target="_blank" class="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-600 hover:text-emerald-700 hover:underline">
-                                    <i class="fa-brands fa-whatsapp text-sm"></i> +${appt.phone}
+                                    <i class="fa-brands fa-whatsapp text-sm"></i> +${esc(appt.phone)}
                                 </a>
                             ` : '<span class="text-slate-300">-</span>'}
                         </td>
@@ -696,7 +822,7 @@ def render_dashboard(request: Request):
                                 ${badgeLabel}
                             </span>
                         </td>
-                        <td class="px-6 py-4 text-xs text-slate-500 max-w-xs truncate">${appt.notes || '-'}</td>
+                        <td class="px-6 py-4 text-xs text-slate-500 max-w-xs truncate">${appt.notes ? esc(appt.notes) : '-'}</td>
                         <td class="px-6 py-4 text-right">${actionsHtml}</td>
                     `;
                     tbody.appendChild(tr);
@@ -710,14 +836,10 @@ def render_dashboard(request: Request):
         }
 
         async function updateStatus(id, newStatus) {
-            const pin = getCookie('dashboard_pin') || localStorage.getItem('dashboard_pin');
             try {
                 const res = await fetch('/api/dashboard/status', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Dashboard-PIN': pin
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ appointment_id: id, status: newStatus })
                 });
                 if (res.ok) {
@@ -750,15 +872,11 @@ def render_dashboard(request: Request):
             const name = document.getElementById('walkin-patient-name').value.trim();
             const phone = document.getElementById('walkin-phone').value.trim();
             const notes = document.getElementById('walkin-notes').value.trim();
-            const pin = getCookie('dashboard_pin') || localStorage.getItem('dashboard_pin');
 
             try {
                 const res = await fetch('/api/dashboard/book', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Dashboard-PIN': pin
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         appointment_id: slotId,
                         patient_name: name,
@@ -797,7 +915,6 @@ def render_dashboard(request: Request):
             e.preventDefault();
             const dateVal = document.getElementById('date-picker').value;
             const message = document.getElementById('broadcast-message').value.trim();
-            const pin = getCookie('dashboard_pin') || localStorage.getItem('dashboard_pin');
             const resultEl = document.getElementById('broadcast-result');
             const btn = document.getElementById('broadcast-btn');
 
@@ -807,10 +924,7 @@ def render_dashboard(request: Request):
             try {
                 const res = await fetch('/api/dashboard/broadcast', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Dashboard-PIN': pin
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ date: dateVal, message: message })
                 });
                 const data = await res.json();

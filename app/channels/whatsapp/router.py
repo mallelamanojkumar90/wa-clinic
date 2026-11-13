@@ -1,4 +1,5 @@
 """WhatsApp Channel Router: Meta Webhook verification, incoming message handling, and interactive dispatch."""
+import hmac
 import json
 import logging
 from typing import Optional
@@ -86,9 +87,11 @@ def process_patient_message(phone: str, text: str, msg_id: str, audio_id: Option
                 "If you or the patient are experiencing a life-threatening medical emergency "
                 "(e.g., severe chest pain, breathing difficulty, uncontrollable bleeding, stroke symptoms, or sudden collapse):\n\n"
                 "🚨 **IMMEDIATELY CALL 108 (Ambulance)** or go to the nearest Hospital Emergency Room.\n\n"
-                "మీరు లేదా రోగి తీవ్రమైన అత్యవసర పరిస్థితిలో ఉంటే, వెంటనే **108 (అంబులెన్స్)** కి కాల్ చేయండి లేదా దగ్గరలోని ఎమర్జెన్సీ ఆసుపత్రికి వెళ్లండి.\n\n"
-                "🏥 Dr. Rao's Clinic Emergency Desk: +91 98765 43210"
+                "మీరు లేదా రోగి తీవ్రమైన అత్యవసర పరిస్థితిలో ఉంటే, వెంటనే **108 (అంబులెన్స్)** కి కాల్ చేయండి లేదా దగ్గరలోని ఎమర్జెన్సీ ఆసుపత్రికి వెళ్లండి."
             )
+            # Only show a clinic emergency line when a real one is configured.
+            if settings.CLINIC_EMERGENCY_PHONE.strip():
+                emergency_reply += f"\n\n🏥 Dr. Rao's Clinic Emergency Desk: {settings.CLINIC_EMERGENCY_PHONE.strip()}"
             save_chat_message(phone, "assistant", emergency_reply)
             _send_msg(phone, emergency_reply)
             return
@@ -102,11 +105,14 @@ def process_patient_message(phone: str, text: str, msg_id: str, audio_id: Option
 
         # 3b. Clinic Information Fast-Path (Deterministic info for static info queries / buttons)
         if is_direct_button_or_static_info:
+            fee_line = "🩺 *Consultation Fee*: ₹500"
+            if settings.ENABLE_RAZORPAY:
+                fee_line += f" (Advance Token: ₹{settings.ADVANCE_TOKEN_AMOUNT_INR} via UPI)"
             info_reply = (
                 "🏥 *Dr. Rao's Clinic Information*\n\n"
                 "⏰ *Timings*: Mon–Sat: 10:00 AM – 01:00 PM & 05:00 PM – 07:00 PM (Closed Sundays)\n"
-                "🩺 *Consultation Fee*: ₹500 (Advance Token: ₹200 via UPI)\n"
-                "📍 *Address*: Dr. Rao's Clinic, Main Road, Hyderabad\n\n"
+                f"{fee_line}\n"
+                f"📍 *Address*: {settings.CLINIC_ADDRESS}\n\n"
                 "Would you like to check today's or tomorrow's available appointment slots?"
             )
             save_chat_message(phone, "assistant", info_reply)
@@ -180,7 +186,7 @@ def meta_webhook_verification(
     configured_token = (settings.VERIFY_TOKEN or "").strip()
     received_token = (hub_verify_token or "").strip()
 
-    if hub_mode == "subscribe" and received_token == configured_token:
+    if hub_mode == "subscribe" and configured_token and hmac.compare_digest(received_token, configured_token):
         logger.info("Webhook verification successful. Echoing challenge.")
         return Response(content=hub_challenge, media_type="text/plain")
 

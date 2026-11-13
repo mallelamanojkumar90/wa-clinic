@@ -19,6 +19,7 @@ WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
+ENV APP_ENV=production
 
 # Copy application source code
 COPY . .

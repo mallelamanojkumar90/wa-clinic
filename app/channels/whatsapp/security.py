@@ -14,8 +14,15 @@ async def verify_meta_signature(request: Request) -> bytes:
     """
     body = await request.body()
 
-    # If META_APP_SECRET is not configured, pass through (e.g. local development)
+    # Without META_APP_SECRET anyone could post fake patient messages, so this is only
+    # allowed outside production (local development and tests).
     if not settings.META_APP_SECRET:
+        if settings.is_production:
+            logger.error("META_APP_SECRET is not configured; rejecting unsigned webhook in production.")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Webhook signature verification is not configured"
+            )
         return body
 
     signature_header = request.headers.get("X-Hub-Signature-256")

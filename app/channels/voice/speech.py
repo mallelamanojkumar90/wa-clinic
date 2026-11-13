@@ -5,15 +5,17 @@ from app.core.tools import _get_tz
 
 def _format_slots_for_speech(slots: List[str], target_context: Optional[str] = None) -> str:
     """Transform ISO slots into natural, warm spoken English for Voice AI synthesis."""
-    if not slots:
-        if target_context == "today":
-            return "Dr. Rao has no remaining slots available today. Would you like me to check upcoming openings for Monday?"
-        elif target_context == "tomorrow":
-            return "Dr. Rao's clinic is closed tomorrow on Sunday. The next available openings are on Monday. Would you like me to reserve a Monday slot?"
-        return "Dr. Rao currently has no open slots available for the next few days. Would you like me to take a message for the front desk?"
-
     tz = _get_tz()
     now = datetime.now(tz)
+
+    if not slots:
+        if target_context == "today":
+            return "Dr. Rao has no remaining slots available today. Would you like me to check the upcoming days?"
+        elif target_context == "tomorrow":
+            if (now + timedelta(days=1)).weekday() == 6:
+                return "Dr. Rao's clinic is closed tomorrow, Sunday. Would you like me to check Monday's openings?"
+            return "Dr. Rao has no open slots tomorrow. Would you like me to check the following days?"
+        return "Dr. Rao currently has no open slots available for the next few days. Would you like me to take a message for the front desk?"
     today_date = now.date()
     tomorrow_date = (now + timedelta(days=1)).date()
 
